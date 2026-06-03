@@ -1,9 +1,9 @@
 {
 	"FileVersion": 3,
-	"Version": 2,
-	"VersionName": "0.2.0",
+	"Version": 3,
+	"VersionName": "0.3.0",
 	"FriendlyName": "UE Node2Code",
-	"Description": "Exports Unreal Engine material node graphs into AI-readable text and recursively expands material functions.",
+	"Description": "Exports Unreal Engine material and material function node graphs into AI-readable text.",
 	"Category": "AI",
 	"CreatedBy": "Codex",
 	"CanContainContent": false,

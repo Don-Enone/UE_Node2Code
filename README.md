@@ -2,7 +2,7 @@
 
 [中文](#中文) | [English](#english)
 
-UE Node2Code is an Unreal Engine 4.26 editor plugin that exports Material and Material Function node graphs into compact, AI-readable text. It can recursively expand Material Functions, deduplicate repeated function definitions, and produce text that is practical to paste into web-based AI chat tools.
+UE Node2Code is an Unreal Engine 4.26+ editor plugin that exports Material and Material Function node graphs into compact, AI-readable text. It can recursively expand Material Functions, deduplicate repeated function definitions, and produce text that is practical to paste into web-based AI chat tools.
 
 Current test exports are compact enough for common AI chat windows: a material node with about 332 shader instructions exports to about 46 KB, and a material node with about 86 shader instructions exports to about 21 KB.
 
@@ -15,6 +15,8 @@ Current test exports are compact enough for common AI chat windows: a material n
 它不会只停留在表层 `MaterialFunctionCall` 节点。默认情况下，插件会打开 Material Function，继续导出函数内部节点；如果内部还有嵌套函数，也会继续展开，直到只剩基础材质表达式节点，或达到用户设置的层级/深度限制。
 
 当前版本支持材质节点和 Material Function 直接导出。蓝图节点暂未支持。
+
+源码目标是 UE 4.26 及后续版本通用。当前已在 UE 4.26 和 UE 5.7.4 验证编译和导出；UE5 相关材质 API 通过版本兼容层适配。
 
 当前测试中，约 332 条 shader instruction 的材质节点导出约 46 KB；约 86 条 shader instruction 的材质节点导出约 21 KB。这个体积通常适合直接复制到网页版 AI 对话窗口。
 
@@ -36,27 +38,29 @@ Current test exports are compact enough for common AI chat windows: a material n
 
 ```text
 UE_Node2Code/
-  Config/
-  Source/
+  UE_Node2Code_Plugin/
+    Source/
+    UE_Node2Code.uplugin
   ForAitoRead_zh.md
   ForAitoRead_en.md
   README.md
-  UE_Node2Code.uplugin
 ```
 
-建议 GitHub 仓库只提交源码插件目录。不要提交 `Binaries/`、`Intermediate/` 或任何打包输出目录。
+`UE_Node2Code` 是 GitHub 仓库根目录。`UE_Node2Code_Plugin` 是实际插件目录，可直接复制进 UE 项目的 `Plugins` 目录，也作为 GitHub Releases 的发布包来源。
+
+不要提交 `Binaries/`、`Intermediate/` 或本地打包输出目录。
 
 ### 安装
 
-把源码插件目录复制到 UE 项目的 `Plugins` 目录：
+把 `UE_Node2Code_Plugin` 目录复制到 UE 项目的 `Plugins` 目录：
 
 ```text
-<YourProject>/Plugins/UE_Node2Code
+<YourProject>/Plugins/UE_Node2Code_Plugin
 ```
 
 然后重新打开项目，在 `Edit > Plugins` 中确认 `UE Node2Code` 已启用。
 
-如果插件需要重新编译，请使用 UE4.26 打开项目，或从源码打包。
+如果插件需要重新编译，请使用 UE 4.26 或更高版本打开项目，或从源码打包。
 
 ### GUI 使用
 
@@ -170,17 +174,17 @@ ForAitoRead_en.md
 
 ### 从源码打包
 
-使用 UE4.26 的 `RunUAT BuildPlugin`：
+使用对应 UE 版本的 `RunUAT BuildPlugin`：
 
 ```text
-<UE_4.26>/Engine/Build/BatchFiles/RunUAT.bat BuildPlugin ^
-  -Plugin="<Repo>/UE_Node2Code.uplugin" ^
+<UE>/Engine/Build/BatchFiles/RunUAT.bat BuildPlugin ^
+  -Plugin="<Repo>/UE_Node2Code_Plugin/UE_Node2Code.uplugin" ^
   -Package="<PackageOutputDir>" ^
   -TargetPlatforms=Win64 ^
   -Rocket
 ```
 
-`<PackageOutputDir>` 可以是任意临时输出目录。打包产物不建议提交到 GitHub 主仓库；需要免编译版本时，可以把打包 zip 放到 GitHub Releases。
+`<PackageOutputDir>` 可以是任意临时输出目录。当前仓库不再保留独立 build 文件夹；需要免编译版本时，把 `UE_Node2Code_Plugin` 或 BuildPlugin 产物打包上传到 GitHub Releases。
 
 ### 常见问题
 
@@ -201,7 +205,7 @@ ForAitoRead_en.md
 - 支持更多材质节点语义压缩。
 - 支持蓝图节点导出。
 - 增加更多导出格式选项。
-- 增加跨 UE 版本兼容性测试。
+- 继续增加更多 UE 版本兼容性测试。
 
 ### 许可
 
@@ -216,6 +220,8 @@ ForAitoRead_en.md
 It does not stop at surface-level `MaterialFunctionCall` nodes. By default, the plugin expands Material Functions, exports their internal nodes, and continues into nested functions until only basic material expressions remain, or until the configured depth limit is reached.
 
 The current version supports Material nodes and direct Material Function export. Blueprint nodes are not supported yet.
+
+The source target is Unreal Engine 4.26 and later. UE 4.26 and UE 5.7.4 have been verified locally for build and export; UE5 material API changes are routed through a small compatibility layer.
 
 In current tests, a material node with about 332 shader instructions exports to about 46 KB, and a material node with about 86 shader instructions exports to about 21 KB. This is usually small enough to paste into a web-based AI chat window.
 
@@ -237,27 +243,29 @@ In current tests, a material node with about 332 shader instructions exports to 
 
 ```text
 UE_Node2Code/
-  Config/
-  Source/
+  UE_Node2Code_Plugin/
+    Source/
+    UE_Node2Code.uplugin
   ForAitoRead_zh.md
   ForAitoRead_en.md
   README.md
-  UE_Node2Code.uplugin
 ```
 
-For GitHub, commit the source plugin directory only. Do not commit `Binaries/`, `Intermediate/`, or any packaged output directory.
+`UE_Node2Code` is the GitHub repository root. `UE_Node2Code_Plugin` is the actual plugin directory; copy it into a project's `Plugins` directory and use it as the source for GitHub Releases.
+
+Do not commit `Binaries/`, `Intermediate/`, or local packaged output directories.
 
 ### Installation
 
-Copy the source plugin directory into your Unreal project:
+Copy `UE_Node2Code_Plugin` into your Unreal project:
 
 ```text
-<YourProject>/Plugins/UE_Node2Code
+<YourProject>/Plugins/UE_Node2Code_Plugin
 ```
 
 Reopen the project and check `Edit > Plugins` to make sure `UE Node2Code` is enabled.
 
-If recompilation is required, open the project with UE4.26 or build the plugin from source.
+If recompilation is required, open the project with UE 4.26 or later, or build the plugin from source.
 
 ### GUI Usage
 
@@ -371,17 +379,17 @@ ForAitoRead_en.md
 
 ### Build From Source
 
-Use Unreal Engine 4.26 `RunUAT BuildPlugin`:
+Use `RunUAT BuildPlugin` from the Unreal Engine version you target:
 
 ```text
-<UE_4.26>/Engine/Build/BatchFiles/RunUAT.bat BuildPlugin ^
-  -Plugin="<Repo>/UE_Node2Code.uplugin" ^
+<UE>/Engine/Build/BatchFiles/RunUAT.bat BuildPlugin ^
+  -Plugin="<Repo>/UE_Node2Code_Plugin/UE_Node2Code.uplugin" ^
   -Package="<PackageOutputDir>" ^
   -TargetPlatforms=Win64 ^
   -Rocket
 ```
 
-`<PackageOutputDir>` can be any temporary output directory. Packaged build artifacts should not be committed to the main GitHub repository. If you need a no-compile package, upload the packaged zip through GitHub Releases.
+`<PackageOutputDir>` can be any temporary output directory. This repository no longer keeps a separate build folder. For no-compile downloads, package `UE_Node2Code_Plugin` or the BuildPlugin output and upload it through GitHub Releases.
 
 ### FAQ
 
@@ -402,7 +410,7 @@ The default target is web-based AI. It cannot read local asset files, so full pa
 - Add more material-node semantic compression.
 - Add Blueprint node export.
 - Add more output format options.
-- Add compatibility tests across Unreal Engine versions.
+- Continue adding compatibility tests across Unreal Engine versions.
 
 ### License
 

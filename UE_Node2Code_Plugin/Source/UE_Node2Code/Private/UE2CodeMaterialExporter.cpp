@@ -1,5 +1,7 @@
 #include "UE2CodeMaterialExporter.h"
 
+#include "UE2CodeEngineCompat.h"
+
 #include "HAL/FileManager.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialExpression.h"
@@ -9,6 +11,7 @@
 #include "Materials/MaterialFunctionInterface.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/DateTime.h"
+#include "Misc/EngineVersion.h"
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
@@ -219,7 +222,7 @@ namespace UE2CodeMaterialExporterPrivate
 			return nullptr;
 		}
 
-		const TArray<FExpressionInput*> Inputs = const_cast<UMaterialExpression*>(Expression)->GetInputs();
+		const TArray<FExpressionInput*> Inputs = UE2CodeEngineCompat::GetExpressionInputs(const_cast<UMaterialExpression*>(Expression));
 		for (FExpressionInput* Input : Inputs)
 		{
 			if (Input && Input->Expression)
@@ -297,7 +300,7 @@ namespace UE2CodeMaterialExporterPrivate
 	static bool ShouldSkipProperty(const FName PropertyName)
 	{
 		static const FName NAME_Material(TEXT("Material"));
-		static const FName NAME_Function(TEXT("Function"));
+		static const FName NAME_FunctionProperty(TEXT("Function"));
 		static const FName NAME_MaterialFunction(TEXT("MaterialFunction"));
 		static const FName NAME_GraphNode(TEXT("GraphNode"));
 		static const FName NAME_Outputs(TEXT("Outputs"));
@@ -328,7 +331,7 @@ namespace UE2CodeMaterialExporterPrivate
 		static const FName NAME_SortPriority(TEXT("SortPriority"));
 
 		return PropertyName == NAME_Material
-			|| PropertyName == NAME_Function
+			|| PropertyName == NAME_FunctionProperty
 			|| PropertyName == NAME_MaterialFunction
 			|| PropertyName == NAME_GraphNode
 			|| PropertyName == NAME_Outputs
@@ -462,7 +465,7 @@ namespace UE2CodeMaterialExporterPrivate
 			return !OutValue.IsEmpty();
 		}
 
-		Property->ExportTextItem(OutValue, ValuePtr, nullptr, nullptr, PPF_None);
+		UE2CodeEngineCompat::ExportPropertyText(Property, OutValue, ValuePtr, nullptr);
 		OutValue = OneLine(OutValue);
 		OutValue = CompactPropertyValue(Property, OutValue);
 		return !OutValue.IsEmpty();
@@ -614,7 +617,7 @@ namespace UE2CodeMaterialExporterPrivate
 		Expressions.Add(Expression);
 
 #if WITH_EDITOR
-		const TArray<FExpressionInput*> Inputs = Expression->GetInputs();
+		const TArray<FExpressionInput*> Inputs = UE2CodeEngineCompat::GetExpressionInputs(Expression);
 		for (FExpressionInput* Input : Inputs)
 		{
 			if (Input && Input->Expression)
@@ -635,18 +638,13 @@ namespace UE2CodeMaterialExporterPrivate
 
 	static UMaterialExpressionFunctionInput* FindFunctionInputById(const UMaterialFunctionInterface* Function, const FGuid& InputId)
 	{
-		if (!Function)
+		TArray<UMaterialExpression*> FunctionExpressions;
+		if (!UE2CodeEngineCompat::GetFunctionExpressions(Function, FunctionExpressions))
 		{
 			return nullptr;
 		}
 
-		const TArray<UMaterialExpression*>* FunctionExpressions = Function->GetFunctionExpressions();
-		if (!FunctionExpressions)
-		{
-			return nullptr;
-		}
-
-		for (UMaterialExpression* Expression : *FunctionExpressions)
+		for (UMaterialExpression* Expression : FunctionExpressions)
 		{
 			UMaterialExpressionFunctionInput* FunctionInput = Cast<UMaterialExpressionFunctionInput>(Expression);
 			if (FunctionInput && FunctionInput->Id == InputId)
@@ -659,18 +657,13 @@ namespace UE2CodeMaterialExporterPrivate
 
 	static UMaterialExpressionFunctionOutput* FindFunctionOutputById(const UMaterialFunctionInterface* Function, const FGuid& OutputId)
 	{
-		if (!Function)
+		TArray<UMaterialExpression*> FunctionExpressions;
+		if (!UE2CodeEngineCompat::GetFunctionExpressions(Function, FunctionExpressions))
 		{
 			return nullptr;
 		}
 
-		const TArray<UMaterialExpression*>* FunctionExpressions = Function->GetFunctionExpressions();
-		if (!FunctionExpressions)
-		{
-			return nullptr;
-		}
-
-		for (UMaterialExpression* Expression : *FunctionExpressions)
+		for (UMaterialExpression* Expression : FunctionExpressions)
 		{
 			UMaterialExpressionFunctionOutput* FunctionOutput = Cast<UMaterialExpressionFunctionOutput>(Expression);
 			if (FunctionOutput && FunctionOutput->Id == OutputId)
@@ -755,8 +748,7 @@ namespace UE2CodeMaterialExporterPrivate
 			return nullptr;
 		}
 
-		const UMaterialFunctionInterface* BaseFunction = FunctionCall->MaterialFunction->GetBaseFunction();
-		return BaseFunction ? BaseFunction : FunctionCall->MaterialFunction;
+		return UE2CodeEngineCompat::GetBaseFunction(FunctionCall->MaterialFunction);
 	}
 
 	static FString GetFunctionDefinitionId(const UMaterialFunctionInterface* Function, FExportContext& Context)
@@ -822,14 +814,14 @@ namespace UE2CodeMaterialExporterPrivate
 
 		GetFunctionDefinitionId(Function, Context);
 
-		const TArray<UMaterialExpression*>* FunctionExpressions = Function->GetFunctionExpressions();
-		if (!FunctionExpressions)
+		TArray<UMaterialExpression*> FunctionExpressions;
+		if (!UE2CodeEngineCompat::GetFunctionExpressions(Function, FunctionExpressions))
 		{
 			return true;
 		}
 
 		Context.FunctionStack.Add(Function);
-		for (UMaterialExpression* Expression : *FunctionExpressions)
+		for (UMaterialExpression* Expression : FunctionExpressions)
 		{
 			if (UMaterialExpressionMaterialFunctionCall* NestedFunctionCall = Cast<UMaterialExpressionMaterialFunctionCall>(Expression))
 			{
@@ -837,7 +829,7 @@ namespace UE2CodeMaterialExporterPrivate
 				RegisterFunctionDefinition(ResolveFunctionForExpansion(NestedFunctionCall), Context, NestedReason);
 			}
 		}
-		Context.FunctionStack.Pop(false);
+		UE2CodeEngineCompat::PopNoShrink(Context.FunctionStack);
 		return true;
 	}
 
@@ -910,23 +902,20 @@ namespace UE2CodeMaterialExporterPrivate
 		const FString FunctionId = GetFunctionDefinitionId(Function, Context);
 		AppendLine(OutText, Depth, FString::Printf(TEXT("function_definition_begin id=%s asset=\"%s\""), *FunctionId, *ObjectRef(Function)));
 
-		if (const FString* Description = Function->GetDescription())
+		const FString Description = UE2CodeEngineCompat::GetFunctionDescription(Function);
+		if (!Description.IsEmpty())
 		{
-			if (!Description->IsEmpty())
-			{
-				AppendLine(OutText, Depth + 1, FString::Printf(TEXT("description: \"%s\""), *OneLine(*Description)));
-			}
+			AppendLine(OutText, Depth + 1, FString::Printf(TEXT("description: \"%s\""), *OneLine(Description)));
 		}
 
-		const TArray<UMaterialExpression*>* FunctionExpressions = Function->GetFunctionExpressions();
-		if (!FunctionExpressions)
+		TArray<UMaterialExpression*> InternalExpressions;
+		if (!UE2CodeEngineCompat::GetFunctionExpressions(Function, InternalExpressions))
 		{
 			AppendLine(OutText, Depth + 1, TEXT("internal_nodes: unavailable"));
 			AppendLine(OutText, Depth, TEXT("function_definition_end"));
 			return;
 		}
 
-		TArray<UMaterialExpression*> InternalExpressions = *FunctionExpressions;
 		RemovePassthroughReroutes(InternalExpressions);
 		SortExpressions(InternalExpressions);
 		CacheApproximateLayoutHints(InternalExpressions, Function, Context);
@@ -938,7 +927,7 @@ namespace UE2CodeMaterialExporterPrivate
 		{
 			AppendExpressionBlock(InternalExpression, OutText, Depth + 2, Context);
 		}
-		Context.FunctionStack.Pop(false);
+		UE2CodeEngineCompat::PopNoShrink(Context.FunctionStack);
 
 		AppendLine(OutText, Depth, TEXT("function_definition_end"));
 	}
@@ -1108,7 +1097,7 @@ namespace UE2CodeMaterialExporterPrivate
 
 		if (!bIsMaterialFunctionCall)
 		{
-			const TArray<FExpressionInput*> Inputs = Expression->GetInputs();
+			const TArray<FExpressionInput*> Inputs = UE2CodeEngineCompat::GetExpressionInputs(Expression);
 			int32 ConnectedInputCount = 0;
 			FString InputText;
 			for (int32 InputIndex = 0; InputIndex < Inputs.Num(); ++InputIndex)
@@ -1182,10 +1171,10 @@ namespace UE2CodeMaterialExporterPrivate
 		AppendLine(OutText, Depth, TEXT("function_outputs: name from out mask rgba"));
 		int32 ConnectedCount = 0;
 
-		const TArray<UMaterialExpression*>* FunctionExpressions = Function ? Function->GetFunctionExpressions() : nullptr;
-		if (FunctionExpressions)
+		TArray<UMaterialExpression*> FunctionExpressions;
+		if (UE2CodeEngineCompat::GetFunctionExpressions(Function, FunctionExpressions))
 		{
-			for (UMaterialExpression* Expression : *FunctionExpressions)
+			for (UMaterialExpression* Expression : FunctionExpressions)
 			{
 				UMaterialExpressionFunctionOutput* FunctionOutput = Cast<UMaterialExpressionFunctionOutput>(Expression);
 				if (!FunctionOutput || !FunctionOutput->A.Expression)
@@ -1236,6 +1225,11 @@ namespace UE2CodeMaterialExporterPrivate
 			AppendLine(OutText, 1, AliasLine);
 		}
 		AppendLine(OutText, 0, TEXT(""));
+	}
+
+	static void AppendEngineVersion(FString& OutText)
+	{
+		AppendLine(OutText, 0, FString::Printf(TEXT("engine_version: %s"), *FEngineVersion::Current().ToString()));
 	}
 
 	static bool SaveTextToFile(const FString& OutputFilePath, const FString& Text, FString& OutError)
@@ -1307,6 +1301,7 @@ bool FUE2CodeMaterialExporter::ExportMaterialToString(UMaterialInterface* Materi
 	AppendLine(OutText, 0, TEXT("UE_NODE2CODE material_export version=2"));
 	AppendAliasTable(OutText);
 	AppendLine(OutText, 0, FString::Printf(TEXT("exported_at_local: %s"), *FDateTime::Now().ToString(TEXT("%Y-%m-%d %H:%M:%S"))));
+	AppendEngineVersion(OutText);
 	AppendLine(OutText, 0, FString::Printf(TEXT("material_interface: %s"), *ObjectRef(Material)));
 	AppendLine(OutText, 0, FString::Printf(TEXT("base_material: %s"), *ObjectRef(BaseMaterial)));
 	AppendLine(OutText, 0, FString::Printf(TEXT("options: expand_material_functions=%s function_definitions=deduplicated export_unreferenced_material_expressions=%s node_hierarchy_depth=%d max_function_depth=%d include_debug_metadata=%s include_default_like_properties=%s"), Options.bExpandMaterialFunctions ? TEXT("true") : TEXT("false"), Options.bExportUnreferencedMaterialExpressions ? TEXT("true") : TEXT("false"), Options.NodeHierarchyDepth, Options.MaxFunctionDepth, Options.bIncludeDebugMetadata ? TEXT("true") : TEXT("false"), Options.bIncludeDefaultLikeProperties ? TEXT("true") : TEXT("false")));
@@ -1329,7 +1324,9 @@ bool FUE2CodeMaterialExporter::ExportMaterialToString(UMaterialInterface* Materi
 
 	if (Options.bExportUnreferencedMaterialExpressions)
 	{
-		for (UMaterialExpression* Expression : BaseMaterial->Expressions)
+		TArray<UMaterialExpression*> MaterialExpressions;
+		UE2CodeEngineCompat::GetMaterialExpressions(BaseMaterial, MaterialExpressions);
+		for (UMaterialExpression* Expression : MaterialExpressions)
 		{
 			AddUniqueExpression(Expression, Expressions, SeenExpressions);
 		}
@@ -1394,20 +1391,15 @@ bool FUE2CodeMaterialExporter::ExportMaterialFunctionToString(UMaterialFunctionI
 		return false;
 	}
 
-	const UMaterialFunctionInterface* FunctionForExport = MaterialFunction->GetBaseFunction();
-	if (!FunctionForExport)
-	{
-		FunctionForExport = MaterialFunction;
-	}
+	const UMaterialFunctionInterface* FunctionForExport = UE2CodeEngineCompat::GetBaseFunction(MaterialFunction);
 
-	const TArray<UMaterialExpression*>* FunctionExpressions = FunctionForExport->GetFunctionExpressions();
-	if (!FunctionExpressions)
+	TArray<UMaterialExpression*> Expressions;
+	if (!UE2CodeEngineCompat::GetFunctionExpressions(FunctionForExport, Expressions))
 	{
 		OutError = FString::Printf(TEXT("Material function '%s' has no readable expression list."), *ObjectRef(FunctionForExport));
 		return false;
 	}
 
-	TArray<UMaterialExpression*> Expressions = *FunctionExpressions;
 	RemovePassthroughReroutes(Expressions);
 	SortExpressions(Expressions);
 
@@ -1415,17 +1407,16 @@ bool FUE2CodeMaterialExporter::ExportMaterialFunctionToString(UMaterialFunctionI
 	AppendLine(OutText, 0, TEXT("UE_NODE2CODE material_function_export version=2"));
 	AppendAliasTable(OutText);
 	AppendLine(OutText, 0, FString::Printf(TEXT("exported_at_local: %s"), *FDateTime::Now().ToString(TEXT("%Y-%m-%d %H:%M:%S"))));
+	AppendEngineVersion(OutText);
 	AppendLine(OutText, 0, FString::Printf(TEXT("material_function: %s"), *ObjectRef(MaterialFunction)));
 	if (FunctionForExport != MaterialFunction)
 	{
 		AppendLine(OutText, 0, FString::Printf(TEXT("base_material_function: %s"), *ObjectRef(FunctionForExport)));
 	}
-	if (const FString* Description = FunctionForExport->GetDescription())
+	const FString Description = UE2CodeEngineCompat::GetFunctionDescription(FunctionForExport);
+	if (!Description.IsEmpty())
 	{
-		if (!Description->IsEmpty())
-		{
-			AppendLine(OutText, 0, FString::Printf(TEXT("description: \"%s\""), *OneLine(*Description)));
-		}
+		AppendLine(OutText, 0, FString::Printf(TEXT("description: \"%s\""), *OneLine(Description)));
 	}
 	AppendLine(OutText, 0, FString::Printf(TEXT("options: expand_material_functions=%s function_definitions=deduplicated node_hierarchy_depth=%d max_function_depth=%d include_debug_metadata=%s include_default_like_properties=%s"), Options.bExpandMaterialFunctions ? TEXT("true") : TEXT("false"), Options.NodeHierarchyDepth, Options.MaxFunctionDepth, Options.bIncludeDebugMetadata ? TEXT("true") : TEXT("false"), Options.bIncludeDefaultLikeProperties ? TEXT("true") : TEXT("false")));
 	AppendLine(OutText, 0, TEXT(""));
@@ -1487,6 +1478,7 @@ bool FUE2CodeMaterialExporter::ExportMaterialPropertyToString(UMaterialInterface
 	OutText.Reset();
 	AppendLine(OutText, 0, TEXT("UE_NODE2CODE material_property_export version=2"));
 	AppendAliasTable(OutText);
+	AppendEngineVersion(OutText);
 	AppendLine(OutText, 0, FString::Printf(TEXT("material_interface: %s"), *ObjectRef(Material)));
 	AppendLine(OutText, 0, FString::Printf(TEXT("base_material: %s"), *ObjectRef(BaseMaterial)));
 	AppendLine(OutText, 0, FString::Printf(TEXT("root_property: %s"), *MaterialPropertyToString(MaterialProperty)));
@@ -1541,7 +1533,9 @@ bool FUE2CodeMaterialExporter::ExportMaterialNodeByNameToString(UMaterialInterfa
 			CollectUpstreamExpressions(Input->Expression, SearchExpressions, SeenExpressions);
 		}
 	}
-	for (UMaterialExpression* Expression : BaseMaterial->Expressions)
+	TArray<UMaterialExpression*> MaterialExpressions;
+	UE2CodeEngineCompat::GetMaterialExpressions(BaseMaterial, MaterialExpressions);
+	for (UMaterialExpression* Expression : MaterialExpressions)
 	{
 		AddUniqueExpression(Expression, SearchExpressions, SeenExpressions);
 	}
@@ -1602,6 +1596,7 @@ bool FUE2CodeMaterialExporter::ExportMaterialExpressionToString(UMaterialExpress
 	OutText.Reset();
 	AppendLine(OutText, 0, TEXT("UE_NODE2CODE material_node_export version=2"));
 	AppendAliasTable(OutText);
+	AppendEngineVersion(OutText);
 	AppendLine(OutText, 0, FString::Printf(TEXT("root_node: %s"), *ExpressionRef(RootExpression)));
 	if (Options.bIncludeDebugMetadata)
 	{

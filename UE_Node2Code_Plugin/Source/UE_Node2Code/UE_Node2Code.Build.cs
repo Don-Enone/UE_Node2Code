@@ -19,7 +19,6 @@ public class UE_Node2Code : ModuleRules
 			new string[]
 			{
 				"DesktopPlatform",
-				"EditorStyle",
 				"InputCore",
 				"LevelEditor",
 				"Projects",
