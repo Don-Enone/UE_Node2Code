@@ -1,0 +1,19 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "UE Node2Code",
+	"Description": "Exports Unreal Engine material node graphs into AI-readable text and recursively expands material functions.",
+	"Category": "AI",
+	"CreatedBy": "Codex",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "UE_Node2Code",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}
