@@ -4,7 +4,7 @@ This document is for AI readers. Follow these rules when reading `.ue2code.txt` 
 
 ## 1. Core Rules
 
-- The export is structured source text for a material graph, not an asset path list.
+- The export is structured source text for a Material or Material Function graph, not an asset path list.
 - `ME_MFC` means `MaterialExpressionMaterialFunctionCall`; it is not a basic computation node.
 - When you see `function_ref: FN001`, read the matching block in `function_definitions`.
 - Each function definition is written once. Multiple call sites reuse it through `function_ref`.
@@ -14,6 +14,7 @@ This document is for AI readers. Follow these rules when reading `.ue2code.txt` 
 
 ```text
 UE_NODE2CODE material_export version=2
+UE_NODE2CODE material_function_export version=2
 aliases:
   ME=MaterialExpression; MF=MaterialFunction; ME_CM=MaterialExpressionComponentMask
 ```
@@ -51,7 +52,23 @@ Meaning:
 
 Unconnected inputs are omitted.
 
-## 4. Outputs
+## 4. Root Outputs
+
+Material exports use:
+
+```text
+material_outputs: property from out mask rgba
+```
+
+Direct Material Function exports use:
+
+```text
+function_outputs: name from out mask rgba
+```
+
+Both are reading entry points. Start from these outputs and follow `from` upstream.
+
+## 5. Outputs
 
 ```text
 outputs: index name mask rgba
@@ -61,7 +78,7 @@ outputs: index name mask rgba
 
 A single default output is usually omitted. Named or multiple outputs are listed.
 
-## 5. Material Functions
+## 6. Material Functions
 
 Function call:
 
@@ -91,7 +108,7 @@ Reading order:
 
 `call_output_bindings` is omitted. Infer output names from the call node `outputs` and `ME_FO` nodes in the function definition.
 
-## 6. Properties
+## 7. Properties
 
 ```text
 properties:
@@ -103,16 +120,16 @@ properties:
 - If a node has no non-default properties, `properties` is omitted.
 - Default values, empty values, editor UI state, GUIDs, and full object paths are usually omitted.
 
-## 7. Reroute And Layout
+## 8. Reroute And Layout
 
 - Passthrough Reroute nodes are omitted. `A -> Reroute -> B` is exported as `A -> B`.
 - `layout_hint` is only a rough layout hint, not execution order.
 - Internal nodes of built-in engine functions usually do not include layout information.
 
-## 8. Recommended Reading Flow
+## 9. Recommended Reading Flow
 
 1. Check `node_hierarchy_depth`.
-2. Start from `material_outputs`, `root_connection`, or `root_node`.
+2. Start from `material_outputs`, `function_outputs`, `root_connection`, or `root_node`.
 3. Trace upstream through `inputs` and `call_inputs`.
 4. When you see `function_ref`, jump to `function_definitions`.
 5. When you see `function_ref: unavailable`, state clearly that the function was not expanded.

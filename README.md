@@ -2,7 +2,7 @@
 
 [中文](#中文) | [English](#english)
 
-UE Node2Code is an Unreal Engine 4.26 editor plugin that exports material node graphs into compact, AI-readable text. It can recursively expand Material Functions, deduplicate repeated function definitions, and produce text that is practical to paste into web-based AI chat tools.
+UE Node2Code is an Unreal Engine 4.26 editor plugin that exports Material and Material Function node graphs into compact, AI-readable text. It can recursively expand Material Functions, deduplicate repeated function definitions, and produce text that is practical to paste into web-based AI chat tools.
 
 Current test exports are compact enough for common AI chat windows: a material node with about 332 shader instructions exports to about 46 KB, and a material node with about 86 shader instructions exports to about 21 KB.
 
@@ -10,17 +10,18 @@ Current test exports are compact enough for common AI chat windows: a material n
 
 ### 简介
 
-`UE_Node2Code` 用于把 UE 材质节点图导出为结构化文本，让 AI 能够阅读材质的真实计算逻辑。
+`UE_Node2Code` 用于把 UE 材质和材质函数节点图导出为结构化文本，让 AI 能够阅读材质的真实计算逻辑。
 
 它不会只停留在表层 `MaterialFunctionCall` 节点。默认情况下，插件会打开 Material Function，继续导出函数内部节点；如果内部还有嵌套函数，也会继续展开，直到只剩基础材质表达式节点，或达到用户设置的层级/深度限制。
 
-当前版本支持材质节点。蓝图节点暂未支持。
+当前版本支持材质节点和 Material Function 直接导出。蓝图节点暂未支持。
 
 当前测试中，约 332 条 shader instruction 的材质节点导出约 46 KB；约 86 条 shader instruction 的材质节点导出约 21 KB。这个体积通常适合直接复制到网页版 AI 对话窗口。
 
 ### 主要功能
 
 - 导出整个材质图。
+- 直接导出 Material Function 内部图。
 - 导出单个材质属性链，例如 `MP_BaseColor`、`MP_Normal`。
 - 导出单个材质节点的上游链。
 - 提供 UE 编辑器 GUI：`Window > UE Node2Code`。
@@ -69,8 +70,8 @@ Window > UE Node2Code
 
 | 选项 | 说明 |
 | --- | --- |
-| `Material` | 材质资源路径、对象路径或 `.uasset` 文件路径 |
-| `Use Selected Material` | 使用当前选中的材质 |
+| `Material / Function` | 材质或材质函数资源路径、对象路径或 `.uasset` 文件路径 |
+| `Use Selected Asset` | 使用当前选中的材质或材质函数 |
 | `Output File` | 输出 `.ue2code.txt` 文件 |
 | `Export Mode` | 导出整个材质、某个材质属性链或某个节点上游链 |
 | `Material Property` | 属性模式下使用，例如 `MP_BaseColor` |
@@ -85,6 +86,7 @@ Window > UE Node2Code
 | 模式 | 用途 |
 | --- | --- |
 | `Material` | 导出整个材质图 |
+| `Material Function` | 直接导出 Material Function 内部图 |
 | `Material Property` | 只导出某个材质属性的上游链 |
 | `Material Node` | 只导出某个节点的上游链 |
 
@@ -108,6 +110,7 @@ function_ref: unavailable reason="NodeHierarchyDepth=..."
 
 ```text
 UE_Node2Code.ExportMaterial <MaterialAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]
+UE_Node2Code.ExportMaterialFunction <MaterialFunctionAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]
 UE_Node2Code.ExportMaterialProperty <MaterialAssetPathOrUAssetFile> <MaterialProperty> <OutputFilePath> [NodeHierarchyDepth]
 UE_Node2Code.ExportMaterialNode <MaterialAssetPathOrUAssetFile> <ExpressionObjectName> <OutputFilePath> [NodeHierarchyDepth]
 ```
@@ -116,6 +119,7 @@ UE_Node2Code.ExportMaterialNode <MaterialAssetPathOrUAssetFile> <ExpressionObjec
 
 ```text
 UE_Node2Code.ExportMaterial /Game/Test/MaterialTest C:/Temp/MaterialExport.ue2code.txt 0
+UE_Node2Code.ExportMaterialFunction /Engine/Functions/Engine_MaterialFunctions02/Utility/DebugFloat3Values C:/Temp/DebugFloat3Values.ue2code.txt 0
 UE_Node2Code.ExportMaterial /Game/Test/MaterialTest C:/Temp/MaterialExport.depth1.ue2code.txt 1
 UE_Node2Code.ExportMaterialProperty /Game/Test/MaterialTest MP_BaseColor C:/Temp/BaseColor.ue2code.txt 2
 ```
@@ -211,13 +215,14 @@ ForAitoRead_en.md
 
 It does not stop at surface-level `MaterialFunctionCall` nodes. By default, the plugin expands Material Functions, exports their internal nodes, and continues into nested functions until only basic material expressions remain, or until the configured depth limit is reached.
 
-The current version supports material nodes. Blueprint nodes are not supported yet.
+The current version supports Material nodes and direct Material Function export. Blueprint nodes are not supported yet.
 
 In current tests, a material node with about 332 shader instructions exports to about 46 KB, and a material node with about 86 shader instructions exports to about 21 KB. This is usually small enough to paste into a web-based AI chat window.
 
 ### Features
 
 - Export a full material graph.
+- Export a Material Function graph directly.
 - Export one material property chain, such as `MP_BaseColor` or `MP_Normal`.
 - Export the upstream chain of one material expression.
 - Editor GUI: `Window > UE Node2Code`.
@@ -266,8 +271,8 @@ Window options:
 
 | Option | Description |
 | --- | --- |
-| `Material` | Material asset path, object path, or `.uasset` file path |
-| `Use Selected Material` | Use the currently selected material |
+| `Material / Function` | Material or Material Function asset path, object path, or `.uasset` file path |
+| `Use Selected Asset` | Use the currently selected material or material function |
 | `Output File` | Target `.ue2code.txt` file |
 | `Export Mode` | Export a full material, one property chain, or one node upstream chain |
 | `Material Property` | Used in property mode, for example `MP_BaseColor` |
@@ -282,6 +287,7 @@ Window options:
 | Mode | Purpose |
 | --- | --- |
 | `Material` | Export the whole material graph |
+| `Material Function` | Export the internal graph of a Material Function directly |
 | `Material Property` | Export only the upstream chain of one material property |
 | `Material Node` | Export only the upstream chain of one expression |
 
@@ -305,6 +311,7 @@ function_ref: unavailable reason="NodeHierarchyDepth=..."
 
 ```text
 UE_Node2Code.ExportMaterial <MaterialAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]
+UE_Node2Code.ExportMaterialFunction <MaterialFunctionAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]
 UE_Node2Code.ExportMaterialProperty <MaterialAssetPathOrUAssetFile> <MaterialProperty> <OutputFilePath> [NodeHierarchyDepth]
 UE_Node2Code.ExportMaterialNode <MaterialAssetPathOrUAssetFile> <ExpressionObjectName> <OutputFilePath> [NodeHierarchyDepth]
 ```
@@ -313,6 +320,7 @@ Examples:
 
 ```text
 UE_Node2Code.ExportMaterial /Game/Test/MaterialTest C:/Temp/MaterialExport.ue2code.txt 0
+UE_Node2Code.ExportMaterialFunction /Engine/Functions/Engine_MaterialFunctions02/Utility/DebugFloat3Values C:/Temp/DebugFloat3Values.ue2code.txt 0
 UE_Node2Code.ExportMaterial /Game/Test/MaterialTest C:/Temp/MaterialExport.depth1.ue2code.txt 1
 UE_Node2Code.ExportMaterialProperty /Game/Test/MaterialTest MP_BaseColor C:/Temp/BaseColor.ue2code.txt 2
 ```

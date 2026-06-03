@@ -4,7 +4,7 @@
 
 ## 1. 基本原则
 
-- 导出文本是材质图的结构化源码，不是资源路径清单。
+- 导出文本是材质图或材质函数图的结构化源码，不是资源路径清单。
 - `ME_MFC` 是 `MaterialExpressionMaterialFunctionCall`，不是基础计算节点。
 - 遇到 `function_ref: FN001`，必须到文末 `function_definitions` 查找实际函数内部图。
 - 同一函数定义只写一次，多次调用只通过 `function_ref` 引用。
@@ -14,6 +14,7 @@
 
 ```text
 UE_NODE2CODE material_export version=2
+UE_NODE2CODE material_function_export version=2
 aliases:
   ME=MaterialExpression; MF=MaterialFunction; ME_CM=MaterialExpressionComponentMask
 ```
@@ -50,7 +51,23 @@ call_inputs: index name from out mask rgba
 
 未连接输入不会输出。
 
-## 4. 输出表
+## 4. 根输出
+
+材质导出使用：
+
+```text
+material_outputs: property from out mask rgba
+```
+
+材质函数直接导出使用：
+
+```text
+function_outputs: name from out mask rgba
+```
+
+两者都是阅读入口。先从这些输出开始，沿 `from` 追踪上游节点。
+
+## 5. 输出表
 
 ```text
 outputs: index name mask rgba
@@ -60,7 +77,7 @@ outputs: index name mask rgba
 
 单个默认输出通常省略 `outputs`。多输出或具名输出才会列出。
 
-## 5. Material Function
+## 6. Material Function
 
 函数调用：
 
@@ -90,7 +107,7 @@ function_definitions:
 
 `call_output_bindings` 已省略。输出名从调用节点 `outputs` 和函数定义中的 `ME_FO` 推断。
 
-## 6. 属性
+## 7. 属性
 
 ```text
 properties:
@@ -102,16 +119,16 @@ properties:
 - 没有非默认属性时，不输出 `properties`。
 - 默认值、空值、编辑器 UI 状态、GUID、完整对象路径通常被省略。
 
-## 7. Reroute 与位置
+## 8. Reroute 与位置
 
 - Reroute 透传节点默认不输出。`A -> Reroute -> B` 会写成 `A -> B`。
 - `layout_hint` 只表示粗略布局，不是执行顺序。
 - 引擎内置函数内部节点通常不输出位置信息。
 
-## 8. 阅读流程
+## 9. 阅读流程
 
 1. 先确认 `node_hierarchy_depth`。
-2. 从 `material_outputs`、`root_connection` 或 `root_node` 开始。
+2. 从 `material_outputs`、`function_outputs`、`root_connection` 或 `root_node` 开始。
 3. 沿 `inputs` / `call_inputs` 追踪上游。
 4. 遇到 `function_ref` 就跳到 `function_definitions`。
 5. 遇到 `function_ref: unavailable` 时，明确说明该函数未展开。

@@ -10,6 +10,7 @@
 #include "IDesktopPlatform.h"
 #include "LevelEditor.h"
 #include "Materials/Material.h"
+#include "Materials/MaterialFunctionInterface.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/MessageDialog.h"
 #include "Misc/PackageName.h"
@@ -73,6 +74,7 @@ namespace
 		void Construct(const FArguments& InArgs)
 		{
 			ModeOptions.Add(MakeShared<FString>(TEXT("Material")));
+			ModeOptions.Add(MakeShared<FString>(TEXT("Material Function")));
 			ModeOptions.Add(MakeShared<FString>(TEXT("Material Property")));
 			ModeOptions.Add(MakeShared<FString>(TEXT("Material Node")));
 			SelectedMode = ModeOptions[0];
@@ -98,7 +100,7 @@ namespace
 						.Padding(0, 3)
 						[
 							MakeTextBoxRow(
-								LOCTEXT("MaterialAsset", "Material"),
+								LOCTEXT("MaterialAsset", "Material / Function"),
 								SAssignNew(MaterialPathTextBox, SEditableTextBox)
 								.Text(FText::FromString(TEXT("/Game/Test/MaterialTest")))
 							)
@@ -118,8 +120,8 @@ namespace
 							.Padding(4, 0)
 							[
 								SNew(SButton)
-								.Text(LOCTEXT("UseSelected", "Use Selected Material"))
-								.OnClicked(this, &SUE2CodeExportWidget::UseSelectedMaterial)
+								.Text(LOCTEXT("UseSelected", "Use Selected Asset"))
+								.OnClicked(this, &SUE2CodeExportWidget::UseSelectedAsset)
 							]
 						]
 						+ SVerticalBox::Slot()
@@ -208,7 +210,7 @@ namespace
 								.MinValue(0)
 								.MaxValue(64)
 								.Value(0)
-								.ToolTipText(LOCTEXT("HierarchyDepthTip", "0 expands functions until basic nodes. 1 exports only the current graph. 2 expands first-level functions."))
+								.ToolTipText(LOCTEXT("HierarchyDepthTip", "0 expands functions until basic nodes. 1 exports only the current graph. 2 expands first-level functions. Higher natural numbers expand deeper nested functions."))
 							)
 						]
 						+ SVerticalBox::Slot()
@@ -310,19 +312,19 @@ namespace
 
 		EVisibility GetPropertyVisibility() const
 		{
-			return SelectedMode == ModeOptions[1] ? EVisibility::Visible : EVisibility::Collapsed;
+			return SelectedMode == ModeOptions[2] ? EVisibility::Visible : EVisibility::Collapsed;
 		}
 
 		EVisibility GetNodeVisibility() const
 		{
-			return SelectedMode == ModeOptions[2] ? EVisibility::Visible : EVisibility::Collapsed;
+			return SelectedMode == ModeOptions[3] ? EVisibility::Visible : EVisibility::Collapsed;
 		}
 
-		FReply UseSelectedMaterial()
+		FReply UseSelectedAsset()
 		{
 			if (!GEditor || !GEditor->GetSelectedObjects())
 			{
-				SetStatus(TEXT("No selected material."));
+				SetStatus(TEXT("No selected material or material function."));
 				return FReply::Handled();
 			}
 
@@ -338,9 +340,23 @@ namespace
 					SetStatus(TEXT("Selected material applied."));
 					return FReply::Handled();
 				}
+
+				if (UMaterialFunctionInterface* MaterialFunction = Cast<UMaterialFunctionInterface>(Object))
+				{
+					MaterialPathTextBox->SetText(FText::FromString(MaterialFunction->GetPathName()));
+					const FString ShortName = MaterialFunction->GetName();
+					OutputPathTextBox->SetText(FText::FromString(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / FString::Printf(TEXT("Codex/%s.ue2code.txt"), *ShortName))));
+					SelectedMode = ModeOptions[1];
+					if (ModeComboBox.IsValid())
+					{
+						ModeComboBox->SetSelectedItem(SelectedMode);
+					}
+					SetStatus(TEXT("Selected material function applied."));
+					return FReply::Handled();
+				}
 			}
 
-			SetStatus(TEXT("Selection does not contain a material."));
+			SetStatus(TEXT("Selection does not contain a material or material function."));
 			return FReply::Handled();
 		}
 
@@ -380,7 +396,7 @@ namespace
 			const FString OutputPath = OutputPathTextBox->GetText().ToString().TrimStartAndEnd();
 			if (MaterialPath.IsEmpty() || OutputPath.IsEmpty())
 			{
-				SetStatus(TEXT("Material and output file are required."));
+				SetStatus(TEXT("Asset and output file are required."));
 				return FReply::Handled();
 			}
 
@@ -396,12 +412,16 @@ namespace
 			{
 				bSuccess = FUE2CodeMaterialExporter::ExportMaterialAssetPathToText(MaterialPath, OutputPath, Options, Error);
 			}
+			else if (SelectedMode == ModeOptions[1])
+			{
+				bSuccess = FUE2CodeMaterialExporter::ExportMaterialFunctionAssetPathToText(MaterialPath, OutputPath, Options, Error);
+			}
 			else
 			{
 				UMaterialInterface* Material = LoadMaterialForExport(MaterialPath, Error);
 				if (Material)
 				{
-					if (SelectedMode == ModeOptions[1])
+					if (SelectedMode == ModeOptions[2])
 					{
 						EMaterialProperty MaterialProperty = MP_MAX;
 						if (FUE2CodeMaterialExporter::ParseMaterialProperty(PropertyTextBox->GetText().ToString(), MaterialProperty))
@@ -513,7 +533,7 @@ void FUE2CodeModule::AddWindowMenuEntry(FMenuBuilder& MenuBuilder)
 {
 	MenuBuilder.AddMenuEntry(
 		LOCTEXT("OpenUE_Node2Code", "UE Node2Code"),
-		LOCTEXT("OpenUE_Node2CodeTooltip", "Open the UE Node2Code material export window."),
+		LOCTEXT("OpenUE_Node2CodeTooltip", "Open the UE Node2Code material and material function export window."),
 		FSlateIcon(),
 		FUIAction(FExecuteAction::CreateRaw(this, &FUE2CodeModule::OpenExportWindow))
 	);
@@ -541,6 +561,13 @@ void FUE2CodeModule::RegisterConsoleCommands()
 		TEXT("UE_Node2Code.ExportMaterial"),
 		TEXT("Exports a material asset to AI-readable text. Args: <MaterialAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]"),
 		FConsoleCommandWithArgsDelegate::CreateRaw(this, &FUE2CodeModule::ExportMaterialCommand),
+		ECVF_Default
+	));
+
+	ConsoleCommands.Add(ConsoleManager.RegisterConsoleCommand(
+		TEXT("UE_Node2Code.ExportMaterialFunction"),
+		TEXT("Exports a material function asset to AI-readable text. Args: <MaterialFunctionAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]"),
+		FConsoleCommandWithArgsDelegate::CreateRaw(this, &FUE2CodeModule::ExportMaterialFunctionCommand),
 		ECVF_Default
 	));
 
@@ -586,6 +613,27 @@ void FUE2CodeModule::ExportMaterialCommand(const TArray<FString>& Args)
 	if (FUE2CodeMaterialExporter::ExportMaterialAssetPathToText(Args[0], Args[1], Options, Error))
 	{
 		UE_LOG(LogUE2Code, Display, TEXT("Exported material graph to %s"), *Args[1]);
+	}
+	else
+	{
+		UE_LOG(LogUE2Code, Error, TEXT("%s"), *Error);
+	}
+}
+
+void FUE2CodeModule::ExportMaterialFunctionCommand(const TArray<FString>& Args)
+{
+	if (Args.Num() < 2)
+	{
+		UE_LOG(LogUE2Code, Error, TEXT("Usage: UE_Node2Code.ExportMaterialFunction <MaterialFunctionAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]"));
+		return;
+	}
+
+	FString Error;
+	FUE2CodeExportOptions Options;
+	ApplyOptionalHierarchyDepth(Args, 2, Options);
+	if (FUE2CodeMaterialExporter::ExportMaterialFunctionAssetPathToText(Args[0], Args[1], Options, Error))
+	{
+		UE_LOG(LogUE2Code, Display, TEXT("Exported material function graph to %s"), *Args[1]);
 	}
 	else
 	{

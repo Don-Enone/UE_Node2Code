@@ -1177,6 +1177,37 @@ namespace UE2CodeMaterialExporterPrivate
 		}
 	}
 
+	static void AppendFunctionOutputs(const UMaterialFunctionInterface* Function, FString& OutText, int32 Depth)
+	{
+		AppendLine(OutText, Depth, TEXT("function_outputs: name from out mask rgba"));
+		int32 ConnectedCount = 0;
+
+		const TArray<UMaterialExpression*>* FunctionExpressions = Function ? Function->GetFunctionExpressions() : nullptr;
+		if (FunctionExpressions)
+		{
+			for (UMaterialExpression* Expression : *FunctionExpressions)
+			{
+				UMaterialExpressionFunctionOutput* FunctionOutput = Cast<UMaterialExpressionFunctionOutput>(Expression);
+				if (!FunctionOutput || !FunctionOutput->A.Expression)
+				{
+					continue;
+				}
+
+				AppendLine(
+					OutText,
+					Depth + 1,
+					FString::Printf(TEXT("%s %s"), *MaybeQuotedName(FunctionOutput->OutputName.ToString()), *CompactConnectionFields(FunctionOutput->A))
+				);
+				++ConnectedCount;
+			}
+		}
+
+		if (ConnectedCount == 0)
+		{
+			AppendLine(OutText, Depth + 1, TEXT("- none"));
+		}
+	}
+
 	static void AppendAliasTable(FString& OutText)
 	{
 		AppendLine(OutText, 0, TEXT("aliases:"));
@@ -1313,6 +1344,101 @@ bool FUE2CodeMaterialExporter::ExportMaterialToString(UMaterialInterface* Materi
 	FExportContext Context;
 	Context.Options = Options;
 	CacheApproximateLayoutHints(Expressions, nullptr, Context);
+	for (UMaterialExpression* Expression : Expressions)
+	{
+		AppendExpressionBlock(Expression, OutText, 1, Context);
+	}
+	AppendFunctionDefinitions(OutText, 0, Context);
+
+	OutError.Reset();
+	return true;
+}
+
+bool FUE2CodeMaterialExporter::ExportMaterialFunctionAssetPathToText(const FString& MaterialFunctionAssetPath, const FString& OutputFilePath, const FUE2CodeExportOptions& Options, FString& OutError)
+{
+	const FString AssetPath = NormalizeMaterialAssetPath(MaterialFunctionAssetPath);
+	UMaterialFunctionInterface* MaterialFunction = Cast<UMaterialFunctionInterface>(StaticLoadObject(UMaterialFunctionInterface::StaticClass(), nullptr, *AssetPath));
+	if (!MaterialFunction && !AssetPath.Contains(TEXT(".")))
+	{
+		const FString ObjectPath = AssetPath + TEXT(".") + FPackageName::GetShortName(AssetPath);
+		MaterialFunction = Cast<UMaterialFunctionInterface>(StaticLoadObject(UMaterialFunctionInterface::StaticClass(), nullptr, *ObjectPath));
+	}
+
+	if (!MaterialFunction)
+	{
+		OutError = FString::Printf(TEXT("Could not load material function asset from '%s' (normalized from '%s')."), *AssetPath, *MaterialFunctionAssetPath);
+		return false;
+	}
+
+	return ExportMaterialFunctionToText(MaterialFunction, OutputFilePath, Options, OutError);
+}
+
+bool FUE2CodeMaterialExporter::ExportMaterialFunctionToText(UMaterialFunctionInterface* MaterialFunction, const FString& OutputFilePath, const FUE2CodeExportOptions& Options, FString& OutError)
+{
+	FString Text;
+	if (!ExportMaterialFunctionToString(MaterialFunction, Options, Text, OutError))
+	{
+		return false;
+	}
+
+	return UE2CodeMaterialExporterPrivate::SaveTextToFile(OutputFilePath, Text, OutError);
+}
+
+bool FUE2CodeMaterialExporter::ExportMaterialFunctionToString(UMaterialFunctionInterface* MaterialFunction, const FUE2CodeExportOptions& Options, FString& OutText, FString& OutError)
+{
+	using namespace UE2CodeMaterialExporterPrivate;
+
+	if (!MaterialFunction)
+	{
+		OutError = TEXT("MaterialFunction is null.");
+		return false;
+	}
+
+	const UMaterialFunctionInterface* FunctionForExport = MaterialFunction->GetBaseFunction();
+	if (!FunctionForExport)
+	{
+		FunctionForExport = MaterialFunction;
+	}
+
+	const TArray<UMaterialExpression*>* FunctionExpressions = FunctionForExport->GetFunctionExpressions();
+	if (!FunctionExpressions)
+	{
+		OutError = FString::Printf(TEXT("Material function '%s' has no readable expression list."), *ObjectRef(FunctionForExport));
+		return false;
+	}
+
+	TArray<UMaterialExpression*> Expressions = *FunctionExpressions;
+	RemovePassthroughReroutes(Expressions);
+	SortExpressions(Expressions);
+
+	OutText.Reset();
+	AppendLine(OutText, 0, TEXT("UE_NODE2CODE material_function_export version=2"));
+	AppendAliasTable(OutText);
+	AppendLine(OutText, 0, FString::Printf(TEXT("exported_at_local: %s"), *FDateTime::Now().ToString(TEXT("%Y-%m-%d %H:%M:%S"))));
+	AppendLine(OutText, 0, FString::Printf(TEXT("material_function: %s"), *ObjectRef(MaterialFunction)));
+	if (FunctionForExport != MaterialFunction)
+	{
+		AppendLine(OutText, 0, FString::Printf(TEXT("base_material_function: %s"), *ObjectRef(FunctionForExport)));
+	}
+	if (const FString* Description = FunctionForExport->GetDescription())
+	{
+		if (!Description->IsEmpty())
+		{
+			AppendLine(OutText, 0, FString::Printf(TEXT("description: \"%s\""), *OneLine(*Description)));
+		}
+	}
+	AppendLine(OutText, 0, FString::Printf(TEXT("options: expand_material_functions=%s function_definitions=deduplicated node_hierarchy_depth=%d max_function_depth=%d include_debug_metadata=%s include_default_like_properties=%s"), Options.bExpandMaterialFunctions ? TEXT("true") : TEXT("false"), Options.NodeHierarchyDepth, Options.MaxFunctionDepth, Options.bIncludeDebugMetadata ? TEXT("true") : TEXT("false"), Options.bIncludeDefaultLikeProperties ? TEXT("true") : TEXT("false")));
+	AppendLine(OutText, 0, TEXT(""));
+
+	AppendFunctionOutputs(FunctionForExport, OutText, 0);
+	AppendLine(OutText, 0, TEXT(""));
+
+	AppendLine(OutText, 0, FString::Printf(TEXT("function_node_count: %d"), Expressions.Num()));
+	AppendLine(OutText, 0, TEXT("function_nodes:"));
+
+	FExportContext Context;
+	Context.Options = Options;
+	CacheApproximateLayoutHints(Expressions, FunctionForExport, Context);
 	for (UMaterialExpression* Expression : Expressions)
 	{
 		AppendExpressionBlock(Expression, OutText, 1, Context);

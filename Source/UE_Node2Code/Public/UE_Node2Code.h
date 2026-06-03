@@ -25,6 +25,7 @@ private:
 	TSharedRef<SDockTab> SpawnExportTab(const FSpawnTabArgs& SpawnTabArgs);
 
 	void ExportMaterialCommand(const TArray<FString>& Args);
+	void ExportMaterialFunctionCommand(const TArray<FString>& Args);
 	void ExportMaterialPropertyCommand(const TArray<FString>& Args);
 	void ExportMaterialNodeCommand(const TArray<FString>& Args);
 

@@ -15,6 +15,21 @@ bool UUE2CodeBlueprintLibrary::ExportMaterialToString(UMaterialInterface* Materi
 	return FUE2CodeMaterialExporter::ExportMaterialToString(Material, Options, OutText, OutError);
 }
 
+bool UUE2CodeBlueprintLibrary::ExportMaterialFunctionAssetPathToText(const FString& MaterialFunctionAssetPath, const FString& OutputFilePath, FUE2CodeExportOptions Options, FString& OutError)
+{
+	return FUE2CodeMaterialExporter::ExportMaterialFunctionAssetPathToText(MaterialFunctionAssetPath, OutputFilePath, Options, OutError);
+}
+
+bool UUE2CodeBlueprintLibrary::ExportMaterialFunctionToText(UMaterialFunctionInterface* MaterialFunction, const FString& OutputFilePath, FUE2CodeExportOptions Options, FString& OutError)
+{
+	return FUE2CodeMaterialExporter::ExportMaterialFunctionToText(MaterialFunction, OutputFilePath, Options, OutError);
+}
+
+bool UUE2CodeBlueprintLibrary::ExportMaterialFunctionToString(UMaterialFunctionInterface* MaterialFunction, FUE2CodeExportOptions Options, FString& OutText, FString& OutError)
+{
+	return FUE2CodeMaterialExporter::ExportMaterialFunctionToString(MaterialFunction, Options, OutText, OutError);
+}
+
 bool UUE2CodeBlueprintLibrary::ExportMaterialPropertyToText(UMaterialInterface* Material, TEnumAsByte<EMaterialProperty> MaterialProperty, const FString& OutputFilePath, FUE2CodeExportOptions Options, FString& OutError)
 {
 	return FUE2CodeMaterialExporter::ExportMaterialPropertyToText(Material, MaterialProperty.GetValue(), OutputFilePath, Options, OutError);

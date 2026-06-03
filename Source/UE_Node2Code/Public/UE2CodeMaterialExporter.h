@@ -5,6 +5,7 @@
 #include "UE2CodeMaterialExporter.generated.h"
 
 class UMaterialExpression;
+class UMaterialFunctionInterface;
 class UMaterialInterface;
 
 USTRUCT(BlueprintType)
@@ -37,6 +38,10 @@ public:
 	static bool ExportMaterialAssetPathToText(const FString& MaterialAssetPath, const FString& OutputFilePath, const FUE2CodeExportOptions& Options, FString& OutError);
 	static bool ExportMaterialToText(UMaterialInterface* Material, const FString& OutputFilePath, const FUE2CodeExportOptions& Options, FString& OutError);
 	static bool ExportMaterialToString(UMaterialInterface* Material, const FUE2CodeExportOptions& Options, FString& OutText, FString& OutError);
+
+	static bool ExportMaterialFunctionAssetPathToText(const FString& MaterialFunctionAssetPath, const FString& OutputFilePath, const FUE2CodeExportOptions& Options, FString& OutError);
+	static bool ExportMaterialFunctionToText(UMaterialFunctionInterface* MaterialFunction, const FString& OutputFilePath, const FUE2CodeExportOptions& Options, FString& OutError);
+	static bool ExportMaterialFunctionToString(UMaterialFunctionInterface* MaterialFunction, const FUE2CodeExportOptions& Options, FString& OutText, FString& OutError);
 
 	static bool ExportMaterialPropertyToText(UMaterialInterface* Material, EMaterialProperty MaterialProperty, const FString& OutputFilePath, const FUE2CodeExportOptions& Options, FString& OutError);
 	static bool ExportMaterialPropertyToString(UMaterialInterface* Material, EMaterialProperty MaterialProperty, const FUE2CodeExportOptions& Options, FString& OutText, FString& OutError);
