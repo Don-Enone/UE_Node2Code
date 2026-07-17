@@ -11,7 +11,8 @@ public class UE_Node2Code : ModuleRules
 			{
 				"Core",
 				"CoreUObject",
-				"Engine"
+				"Engine",
+				"Niagara"
 			}
 		);
 
@@ -21,6 +22,7 @@ public class UE_Node2Code : ModuleRules
 				"DesktopPlatform",
 				"InputCore",
 				"LevelEditor",
+				"NiagaraEditor",
 				"Projects",
 				"Slate",
 				"SlateCore",

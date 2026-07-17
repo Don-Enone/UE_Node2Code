@@ -39,3 +39,33 @@ bool UUE2CodeBlueprintLibrary::ExportMaterialNodeByNameToText(UMaterialInterface
 {
 	return FUE2CodeMaterialExporter::ExportMaterialNodeByNameToText(Material, ExpressionObjectName, OutputFilePath, Options, OutError);
 }
+
+bool UUE2CodeBlueprintLibrary::ExportNiagaraFunctionScriptAssetPathToText(const FString& ScriptAssetPath, const FString& OutputFilePath, FUE2CodeExportOptions Options, FString& OutError)
+{
+	return FUE2CodeNiagaraExporter::ExportNiagaraFunctionScriptAssetPathToText(ScriptAssetPath, OutputFilePath, Options, OutError);
+}
+
+bool UUE2CodeBlueprintLibrary::ExportNiagaraFunctionScriptToText(UNiagaraScript* Script, const FString& OutputFilePath, FUE2CodeExportOptions Options, FString& OutError)
+{
+	return FUE2CodeNiagaraExporter::ExportNiagaraFunctionScriptToText(Script, OutputFilePath, Options, OutError);
+}
+
+bool UUE2CodeBlueprintLibrary::ExportNiagaraFunctionScriptToString(UNiagaraScript* Script, FUE2CodeExportOptions Options, FString& OutText, FString& OutError)
+{
+	return FUE2CodeNiagaraExporter::ExportNiagaraFunctionScriptToString(Script, Options, OutText, OutError);
+}
+
+bool UUE2CodeBlueprintLibrary::ExportNiagaraModuleScriptAssetPathToText(const FString& ScriptAssetPath, const FString& OutputFilePath, FUE2CodeExportOptions Options, FString& OutError)
+{
+	return FUE2CodeNiagaraExporter::ExportNiagaraModuleScriptAssetPathToText(ScriptAssetPath, OutputFilePath, Options, OutError);
+}
+
+bool UUE2CodeBlueprintLibrary::ExportNiagaraModuleScriptToText(UNiagaraScript* Script, const FString& OutputFilePath, FUE2CodeExportOptions Options, FString& OutError)
+{
+	return FUE2CodeNiagaraExporter::ExportNiagaraModuleScriptToText(Script, OutputFilePath, Options, OutError);
+}
+
+bool UUE2CodeBlueprintLibrary::ExportNiagaraModuleScriptToString(UNiagaraScript* Script, FUE2CodeExportOptions Options, FString& OutText, FString& OutError)
+{
+	return FUE2CodeNiagaraExporter::ExportNiagaraModuleScriptToString(Script, Options, OutText, OutError);
+}

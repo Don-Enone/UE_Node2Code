@@ -9,12 +9,15 @@ This document is for AI readers. Follow these rules when reading `.ue2code.txt` 
 - When you see `function_ref: FN001`, read the matching block in `function_definitions`.
 - Each function definition is written once. Multiple call sites reuse it through `function_ref`.
 - `function_ref: unavailable` means the function was not expanded. The reason is on the same line. Do not pretend to know its internals.
+- In Niagara exports, `called_script` is an external script reference; the current format does not include that script's internal graph.
 
 ## 2. Header
 
 ```text
 UE_NODE2CODE material_export version=2
 UE_NODE2CODE material_function_export version=2
+UE_NODE2CODE niagara_function_script_export version=1
+UE_NODE2CODE niagara_module_script_export version=1
 aliases:
   ME=MaterialExpression; MF=MaterialFunction; ME_CM=MaterialExpressionComponentMask
 ```
@@ -126,10 +129,37 @@ properties:
 - `layout_hint` is only a rough layout hint, not execution order.
 - Internal nodes of built-in engine functions usually do not include layout information.
 
-## 9. Recommended Reading Flow
+## 9. Niagara Scripts
 
-1. Check `node_hierarchy_depth`.
+Niagara Function and Module Script exports use generic nodes and pins. Function signatures use `function_inputs` / `function_outputs`; Module signatures use `module_inputs` / `module_outputs`:
+
+```text
+function_inputs:
+  - name="Probability" type=Float required=false default="0.5"
+function_outputs:
+  - name="Result" type=Bool
+nodes:
+  node_begin id=N001 type=Input
+    pins:
+      - out name="Probability" type=Float pin_id=11111111-1111-1111-1111-111111111111
+  node_end
+connections: from_node from_pin from_pin_id to_node to_pin to_pin_id
+  N001 "Probability" 11111111-1111-1111-1111-111111111111 N002 "A" 22222222-2222-2222-2222-222222222222
+```
+
+- `usage` must match the format header: `Function` for `niagara_function_script_export`, or `Module` for `niagara_module_script_export`. Dynamic Inputs are rejected.
+- `in` / `out` are pin directions, `name` is the internal pin name, `display_name` is optional UI text, and `type` is the Niagara type.
+- Every pin has a stable `pin_id`. `connections` is the directed edge table from output pins to input pins and repeats both endpoint IDs, so display-name collisions are harmless.
+- An unconnected input may have a `default`; `default_ignored=true` means the compiler does not use the serialized default.
+- `enabled_state` is semantically significant: a `Disabled` node must not be interpreted as executing normally.
+- `called_script`, `called_script_path`, and `called_usage` identify a FunctionCall target; UE5 exports also include `called_script_version` when a version is selected. Its implementation is not recursively expanded.
+- `properties` contains non-default editable scalar properties plus required structural data such as Convert `Connections`, Static Switch settings, and propagated FunctionCall parameters. Custom HLSL text uses `\n` for line breaks.
+
+## 10. Recommended Reading Flow
+
+1. For a Material export, check `node_hierarchy_depth`; Niagara Function/Module v1 has no hierarchy-depth field.
 2. Start from `material_outputs`, `function_outputs`, `root_connection`, or `root_node`.
 3. Trace upstream through `inputs` and `call_inputs`.
 4. When you see `function_ref`, jump to `function_definitions`.
-5. When you see `function_ref: unavailable`, state clearly that the function was not expanded.
+5. For Niagara graphs, connect nodes through `connections`; treat `called_script` as an external implementation.
+6. When you see `function_ref: unavailable`, state clearly that the function was not expanded.

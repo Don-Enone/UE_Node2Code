@@ -1,9 +1,9 @@
 {
 	"FileVersion": 3,
-	"Version": 3,
-	"VersionName": "0.3.0",
+	"Version": 5,
+	"VersionName": "0.5.0",
 	"FriendlyName": "UE Node2Code",
-	"Description": "Exports Unreal Engine material and material function node graphs into AI-readable text.",
+	"Description": "Exports Material, Material Function, Niagara Function Script, and Niagara Module Script graphs into AI-readable text.",
 	"Category": "AI",
 	"CreatedBy": "Codex",
 	"CanContainContent": false,
@@ -14,6 +14,12 @@
 			"Name": "UE_Node2Code",
 			"Type": "Editor",
 			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "Niagara",
+			"Enabled": true
 		}
 	]
 }

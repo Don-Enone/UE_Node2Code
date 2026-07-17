@@ -2,7 +2,7 @@
 
 [中文](#中文) | [English](#english)
 
-UE Node2Code is an Unreal Engine 4.26+ editor plugin that exports Material and Material Function node graphs into compact, AI-readable text. It can recursively expand Material Functions, deduplicate repeated function definitions, and produce text that is practical to paste into web-based AI chat tools.
+UE Node2Code is an Unreal Engine 4.26+ editor plugin that exports Material, Material Function, Niagara Function Script, and Niagara Module Script graphs into compact, AI-readable text. It can recursively expand Material Functions, preserve Niagara node/pin/connection semantics, and produce text that is practical to paste into web-based AI chat tools.
 
 Current test exports are compact enough for common AI chat windows: a material node with about 332 shader instructions exports to about 46 KB, and a material node with about 86 shader instructions exports to about 21 KB.
 
@@ -10,13 +10,13 @@ Current test exports are compact enough for common AI chat windows: a material n
 
 ### 简介
 
-`UE_Node2Code` 用于把 UE 材质和材质函数节点图导出为结构化文本，让 AI 能够阅读材质的真实计算逻辑。
+`UE_Node2Code` 用于把 UE 材质、材质函数、Niagara Function Script 和 Niagara Module Script 节点图导出为结构化文本，让 AI 能够阅读图的真实计算逻辑。
 
 它不会只停留在表层 `MaterialFunctionCall` 节点。默认情况下，插件会打开 Material Function，继续导出函数内部节点；如果内部还有嵌套函数，也会继续展开，直到只剩基础材质表达式节点，或达到用户设置的层级/深度限制。
 
-当前版本支持材质节点和 Material Function 直接导出。蓝图节点暂未支持。
+当前版本支持材质节点、Material Function、Niagara Function Script 和 Niagara Module Script 直接导出。蓝图节点暂未支持。
 
-源码目标是 UE 4.26 及后续版本通用。当前已在 UE 4.26 和 UE 5.7.4 验证编译和导出；UE5 相关材质 API 通过版本兼容层适配。
+源码目标是 UE 4.26 及后续版本通用。既有材质流程已在 UE 4.26 和 UE 5.7.4 验证编译和导出；本次 Niagara 支持已在 UE 4.26 验证编译、自动化测试和命令行导出，并在 UE 5.8 验证编译。
 
 当前测试中，约 332 条 shader instruction 的材质节点导出约 46 KB；约 86 条 shader instruction 的材质节点导出约 21 KB。这个体积通常适合直接复制到网页版 AI 对话窗口。
 
@@ -24,6 +24,9 @@ Current test exports are compact enough for common AI chat windows: a material n
 
 - 导出整个材质图。
 - 直接导出 Material Function 内部图。
+- 直接导出 Niagara Function Script，包含函数输入/输出、节点、引脚类型、默认值和连线。
+- 直接导出 Niagara Module Script，包含模块输入/输出以及完整图语义。
+- 记录 Niagara FunctionCall 引用的脚本资产和 Usage；当前不递归展开被调用的 Niagara 脚本。
 - 导出单个材质属性链，例如 `MP_BaseColor`、`MP_Normal`。
 - 导出单个材质节点的上游链。
 - 提供 UE 编辑器 GUI：`Window > UE Node2Code`。
@@ -31,7 +34,7 @@ Current test exports are compact enough for common AI chat windows: a material n
 - 支持 `NodeHierarchyDepth` 控制函数展开层级。
 - 同一个 Material Function 定义只导出一次，多次调用使用同一个 `function_ref`。
 - Reroute 透传节点会被内联，不作为独立计算节点输出。
-- 默认省略完整资源路径、GUID、精确编辑器坐标、未连接引脚、空属性块和默认值。
+- 材质 v2 默认省略完整资源路径、GUID、精确坐标、未连接引脚和默认值；Niagara v1 会保留节点坐标、全部有效引脚、稳定引脚 ID、未连接输入默认值及显式连线，以免丢失图语义。
 - 使用 v2 精简格式：文件头别名表、短节点 ID、表格化输入/输出、资源短名。
 
 ### 仓库结构
@@ -74,16 +77,16 @@ Window > UE Node2Code
 
 | 选项 | 说明 |
 | --- | --- |
-| `Material / Function` | 材质或材质函数资源路径、对象路径或 `.uasset` 文件路径 |
-| `Use Selected Asset` | 使用当前选中的材质或材质函数 |
+| `Graph Asset` | 材质、材质函数、Niagara Function Script 或 Niagara Module Script 的资源路径、对象路径或 `.uasset` 文件路径 |
+| `Use Selected Asset` | 使用当前选中的受支持图资源，并自动切换导出模式 |
 | `Output File` | 输出 `.ue2code.txt` 文件 |
-| `Export Mode` | 导出整个材质、某个材质属性链或某个节点上游链 |
+| `Export Mode` | 选择材质、材质函数、Niagara Function/Module Script、属性链或节点链 |
 | `Material Property` | 属性模式下使用，例如 `MP_BaseColor` |
 | `Node Name` | 节点模式下使用，例如 `MaterialExpressionMultiply_3` |
-| `Node Hierarchy Depth` | 控制函数展开层级 |
+| `Node Hierarchy Depth` | 控制 Material Function 展开层级；Niagara 模式下隐藏 |
 | `Export Unreferenced Material Nodes` | 整材质导出时是否包含未被材质输出引用的节点 |
-| `Include Debug Metadata` | 输出对象路径、GUID 等调试信息 |
-| `Include Default-Like Properties` | 输出默认值、空值等通常被过滤的信息 |
+| `Include Debug Metadata` | 输出对象路径、节点 GUID 等额外调试信息 |
+| `Include Default-Like Properties` | 输出节点属性中通常被过滤的默认值、空值等；不影响 Niagara 引脚默认值 |
 
 ### 导出模式
 
@@ -91,6 +94,8 @@ Window > UE Node2Code
 | --- | --- |
 | `Material` | 导出整个材质图 |
 | `Material Function` | 直接导出 Material Function 内部图 |
+| `Niagara Function Script` | 导出 Function Usage 的 Niagara Script 图 |
+| `Niagara Module Script` | 导出 Module Usage 的 Niagara Script 图 |
 | `Material Property` | 只导出某个材质属性的上游链 |
 | `Material Node` | 只导出某个节点的上游链 |
 
@@ -115,6 +120,8 @@ function_ref: unavailable reason="NodeHierarchyDepth=..."
 ```text
 UE_Node2Code.ExportMaterial <MaterialAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]
 UE_Node2Code.ExportMaterialFunction <MaterialFunctionAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]
+UE_Node2Code.ExportNiagaraFunctionScript <ScriptAssetPathOrUAssetFile> <OutputFilePath>
+UE_Node2Code.ExportNiagaraModuleScript <ScriptAssetPathOrUAssetFile> <OutputFilePath>
 UE_Node2Code.ExportMaterialProperty <MaterialAssetPathOrUAssetFile> <MaterialProperty> <OutputFilePath> [NodeHierarchyDepth]
 UE_Node2Code.ExportMaterialNode <MaterialAssetPathOrUAssetFile> <ExpressionObjectName> <OutputFilePath> [NodeHierarchyDepth]
 ```
@@ -124,6 +131,8 @@ UE_Node2Code.ExportMaterialNode <MaterialAssetPathOrUAssetFile> <ExpressionObjec
 ```text
 UE_Node2Code.ExportMaterial /Game/Test/MaterialTest C:/Temp/MaterialExport.ue2code.txt 0
 UE_Node2Code.ExportMaterialFunction /Engine/Functions/Engine_MaterialFunctions02/Utility/DebugFloat3Values C:/Temp/DebugFloat3Values.ue2code.txt 0
+UE_Node2Code.ExportNiagaraFunctionScript /Niagara/Functions/RandomBool.RandomBool C:/Temp/RandomBool.ue2code.txt
+UE_Node2Code.ExportNiagaraModuleScript /Niagara/Modules/Emitter/SpawnRate.SpawnRate C:/Temp/SpawnRate.ue2code.txt
 UE_Node2Code.ExportMaterial /Game/Test/MaterialTest C:/Temp/MaterialExport.depth1.ue2code.txt 1
 UE_Node2Code.ExportMaterialProperty /Game/Test/MaterialTest MP_BaseColor C:/Temp/BaseColor.ue2code.txt 2
 ```
@@ -163,6 +172,33 @@ node_begin id="ME_TS_1" type=ME_TS role=basic
     - Texture = T_IceDecal_normal
     - SamplerType = SAMPLERTYPE_Normal
 node_end
+```
+
+Niagara Function Script 与 Module Script 使用独立的 v1 格式，并共享节点/引脚/连线结构：
+
+```text
+UE_NODE2CODE niagara_function_script_export version=1
+niagara_function_script: ExampleFunction
+usage: Function
+function_inputs:
+  - name="Probability" type=Float required=false ...
+nodes:
+  node_begin id=N001 type=Input
+    pins:
+      - out name="Probability" type=Float pin_id=11111111-1111-1111-1111-111111111111
+  node_end
+connections: from_node from_pin from_pin_id to_node to_pin to_pin_id
+  N001 "Probability" 11111111-1111-1111-1111-111111111111 N002 "A" 22222222-2222-2222-2222-222222222222
+```
+
+Module Script 使用对应的头与签名字段：
+
+```text
+UE_NODE2CODE niagara_module_script_export version=1
+niagara_module_script: SpawnRate
+usage: Module
+module_inputs:
+module_outputs:
 ```
 
 AI 阅读规则见：
@@ -215,13 +251,13 @@ ForAitoRead_en.md
 
 ### Overview
 
-`UE_Node2Code` exports Unreal Engine material node graphs into structured text so AI tools can read the actual material logic.
+`UE_Node2Code` exports Unreal Engine Material, Material Function, Niagara Function Script, and Niagara Module Script graphs into structured text so AI tools can read their actual logic.
 
 It does not stop at surface-level `MaterialFunctionCall` nodes. By default, the plugin expands Material Functions, exports their internal nodes, and continues into nested functions until only basic material expressions remain, or until the configured depth limit is reached.
 
-The current version supports Material nodes and direct Material Function export. Blueprint nodes are not supported yet.
+The current version supports Material nodes, direct Material Function export, Niagara Function Script export, and Niagara Module Script export. Blueprint nodes are not supported yet.
 
-The source target is Unreal Engine 4.26 and later. UE 4.26 and UE 5.7.4 have been verified locally for build and export; UE5 material API changes are routed through a small compatibility layer.
+The source target is Unreal Engine 4.26 and later. The existing Material flow has been verified locally for build and export on UE 4.26 and UE 5.7.4. This Niagara support has been verified by build, automation test, and command-line export on UE 4.26, plus compilation on UE 5.8.
 
 In current tests, a material node with about 332 shader instructions exports to about 46 KB, and a material node with about 86 shader instructions exports to about 21 KB. This is usually small enough to paste into a web-based AI chat window.
 
@@ -229,6 +265,9 @@ In current tests, a material node with about 332 shader instructions exports to 
 
 - Export a full material graph.
 - Export a Material Function graph directly.
+- Export a Niagara Function Script with its signature, nodes, pin types, defaults, and connections.
+- Export a Niagara Module Script with its module inputs/outputs and complete graph semantics.
+- Record referenced scripts and usages on Niagara FunctionCall nodes; referenced Niagara scripts are not recursively expanded yet.
 - Export one material property chain, such as `MP_BaseColor` or `MP_Normal`.
 - Export the upstream chain of one material expression.
 - Editor GUI: `Window > UE Node2Code`.
@@ -236,7 +275,7 @@ In current tests, a material node with about 332 shader instructions exports to 
 - Function expansion depth control through `NodeHierarchyDepth`.
 - Deduplicate repeated Material Function definitions with `function_ref`.
 - Inline passthrough Reroute nodes.
-- Omit full asset paths, GUIDs, exact editor coordinates, unconnected pins, empty property blocks, and default values by default.
+- Material v2 omits full asset paths, GUIDs, exact coordinates, unconnected pins, and defaults by default. Niagara v1 keeps node coordinates, every valid pin, stable pin IDs, unconnected-input defaults, and explicit connections so graph semantics are not lost.
 - Compact v2 output format: alias table, short node IDs, tabular inputs/outputs, and short asset names.
 
 ### Repository Layout
@@ -279,16 +318,16 @@ Window options:
 
 | Option | Description |
 | --- | --- |
-| `Material / Function` | Material or Material Function asset path, object path, or `.uasset` file path |
-| `Use Selected Asset` | Use the currently selected material or material function |
+| `Graph Asset` | Material, Material Function, Niagara Function Script, or Niagara Module Script asset/object/`.uasset` path |
+| `Use Selected Asset` | Use the selected supported graph asset and switch mode automatically |
 | `Output File` | Target `.ue2code.txt` file |
-| `Export Mode` | Export a full material, one property chain, or one node upstream chain |
+| `Export Mode` | Select Material, Material Function, Niagara Function/Module Script, property-chain, or node-chain export |
 | `Material Property` | Used in property mode, for example `MP_BaseColor` |
 | `Node Name` | Used in node mode, for example `MaterialExpressionMultiply_3` |
-| `Node Hierarchy Depth` | Controls function expansion depth |
+| `Node Hierarchy Depth` | Controls Material Function expansion; hidden in Niagara mode |
 | `Export Unreferenced Material Nodes` | Include nodes not referenced by material outputs during full-material export |
-| `Include Debug Metadata` | Include object paths, GUIDs, and other debug metadata |
-| `Include Default-Like Properties` | Include default or empty values that are usually filtered |
+| `Include Debug Metadata` | Include object paths, node GUIDs, and other extra debug metadata |
+| `Include Default-Like Properties` | Include default or empty node-property values that are usually filtered; Niagara pin defaults are unaffected |
 
 ### Export Modes
 
@@ -296,6 +335,8 @@ Window options:
 | --- | --- |
 | `Material` | Export the whole material graph |
 | `Material Function` | Export the internal graph of a Material Function directly |
+| `Niagara Function Script` | Export a Niagara Script whose Usage is Function |
+| `Niagara Module Script` | Export a Niagara Script whose Usage is Module |
 | `Material Property` | Export only the upstream chain of one material property |
 | `Material Node` | Export only the upstream chain of one expression |
 
@@ -320,6 +361,8 @@ function_ref: unavailable reason="NodeHierarchyDepth=..."
 ```text
 UE_Node2Code.ExportMaterial <MaterialAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]
 UE_Node2Code.ExportMaterialFunction <MaterialFunctionAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]
+UE_Node2Code.ExportNiagaraFunctionScript <ScriptAssetPathOrUAssetFile> <OutputFilePath>
+UE_Node2Code.ExportNiagaraModuleScript <ScriptAssetPathOrUAssetFile> <OutputFilePath>
 UE_Node2Code.ExportMaterialProperty <MaterialAssetPathOrUAssetFile> <MaterialProperty> <OutputFilePath> [NodeHierarchyDepth]
 UE_Node2Code.ExportMaterialNode <MaterialAssetPathOrUAssetFile> <ExpressionObjectName> <OutputFilePath> [NodeHierarchyDepth]
 ```
@@ -329,6 +372,8 @@ Examples:
 ```text
 UE_Node2Code.ExportMaterial /Game/Test/MaterialTest C:/Temp/MaterialExport.ue2code.txt 0
 UE_Node2Code.ExportMaterialFunction /Engine/Functions/Engine_MaterialFunctions02/Utility/DebugFloat3Values C:/Temp/DebugFloat3Values.ue2code.txt 0
+UE_Node2Code.ExportNiagaraFunctionScript /Niagara/Functions/RandomBool.RandomBool C:/Temp/RandomBool.ue2code.txt
+UE_Node2Code.ExportNiagaraModuleScript /Niagara/Modules/Emitter/SpawnRate.SpawnRate C:/Temp/SpawnRate.ue2code.txt
 UE_Node2Code.ExportMaterial /Game/Test/MaterialTest C:/Temp/MaterialExport.depth1.ue2code.txt 1
 UE_Node2Code.ExportMaterialProperty /Game/Test/MaterialTest MP_BaseColor C:/Temp/BaseColor.ue2code.txt 2
 ```
@@ -368,6 +413,33 @@ node_begin id="ME_TS_1" type=ME_TS role=basic
     - Texture = T_IceDecal_normal
     - SamplerType = SAMPLERTYPE_Normal
 node_end
+```
+
+Niagara Function Scripts and Module Scripts use separate v1 headers while sharing the node/pin/connection structure:
+
+```text
+UE_NODE2CODE niagara_function_script_export version=1
+niagara_function_script: ExampleFunction
+usage: Function
+function_inputs:
+  - name="Probability" type=Float required=false ...
+nodes:
+  node_begin id=N001 type=Input
+    pins:
+      - out name="Probability" type=Float pin_id=11111111-1111-1111-1111-111111111111
+  node_end
+connections: from_node from_pin from_pin_id to_node to_pin to_pin_id
+  N001 "Probability" 11111111-1111-1111-1111-111111111111 N002 "A" 22222222-2222-2222-2222-222222222222
+```
+
+Module Scripts use the corresponding header and signature fields:
+
+```text
+UE_NODE2CODE niagara_module_script_export version=1
+niagara_module_script: SpawnRate
+usage: Module
+module_inputs:
+module_outputs:
 ```
 
 AI reading rules:
