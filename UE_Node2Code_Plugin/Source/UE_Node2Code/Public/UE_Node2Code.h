@@ -26,6 +26,8 @@ private:
 
 	void ExportMaterialCommand(const TArray<FString>& Args);
 	void ExportMaterialFunctionCommand(const TArray<FString>& Args);
+	void ExportNiagaraFunctionScriptCommand(const TArray<FString>& Args);
+	void ExportNiagaraModuleScriptCommand(const TArray<FString>& Args);
 	void ExportMaterialPropertyCommand(const TArray<FString>& Args);
 	void ExportMaterialNodeCommand(const TArray<FString>& Args);
 

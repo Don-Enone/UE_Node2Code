@@ -9,12 +9,15 @@
 - 遇到 `function_ref: FN001`，必须到文末 `function_definitions` 查找实际函数内部图。
 - 同一函数定义只写一次，多次调用只通过 `function_ref` 引用。
 - `function_ref: unavailable` 表示函数没有展开，原因写在同一行；不要假装知道其内部实现。
+- Niagara 导出中的 `called_script` 是外部脚本引用；当前格式不会附带该脚本的内部图。
 
 ## 2. 常见结构
 
 ```text
 UE_NODE2CODE material_export version=2
 UE_NODE2CODE material_function_export version=2
+UE_NODE2CODE niagara_function_script_export version=1
+UE_NODE2CODE niagara_module_script_export version=1
 aliases:
   ME=MaterialExpression; MF=MaterialFunction; ME_CM=MaterialExpressionComponentMask
 ```
@@ -125,10 +128,37 @@ properties:
 - `layout_hint` 只表示粗略布局，不是执行顺序。
 - 引擎内置函数内部节点通常不输出位置信息。
 
-## 9. 阅读流程
+## 9. Niagara Script
 
-1. 先确认 `node_hierarchy_depth`。
+Niagara Function 与 Module Script 导出使用通用节点与引脚结构。Function 签名使用 `function_inputs` / `function_outputs`，Module 签名使用 `module_inputs` / `module_outputs`：
+
+```text
+function_inputs:
+  - name="Probability" type=Float required=false default="0.5"
+function_outputs:
+  - name="Result" type=Bool
+nodes:
+  node_begin id=N001 type=Input
+    pins:
+      - out name="Probability" type=Float pin_id=11111111-1111-1111-1111-111111111111
+  node_end
+connections: from_node from_pin from_pin_id to_node to_pin to_pin_id
+  N001 "Probability" 11111111-1111-1111-1111-111111111111 N002 "A" 22222222-2222-2222-2222-222222222222
+```
+
+- `usage` 必须与格式头匹配：`niagara_function_script_export` 对应 `Function`，`niagara_module_script_export` 对应 `Module`。Dynamic Input 会被拒绝。
+- `in` / `out` 是引脚方向，`name` 是内部引脚名，`display_name` 是可选界面文本，`type` 是 Niagara 类型。
+- 每个引脚都有稳定的 `pin_id`；`connections` 是从输出到输入的有向边表，并重复两端 ID，因此显示名重名不会造成歧义。
+- 未连接输入可带 `default`；`default_ignored=true` 表示编译器不会使用序列化默认值。
+- `enabled_state` 具有语义：不能把 `Disabled` 节点解释为正常执行。
+- `called_script`、`called_script_path` 和 `called_usage` 表示 FunctionCall 的目标；UE5 在选择了脚本版本时还会输出 `called_script_version`。其内部实现未递归展开。
+- `properties` 保存非默认的可编辑标量属性，以及 Convert `Connections`、Static Switch 设置和 FunctionCall 传播参数等必要结构数据。Custom HLSL 正文中的换行写成 `\n`。
+
+## 10. 阅读流程
+
+1. 材质导出先确认 `node_hierarchy_depth`；Niagara Function/Module v1 没有该字段。
 2. 从 `material_outputs`、`function_outputs`、`root_connection` 或 `root_node` 开始。
 3. 沿 `inputs` / `call_inputs` 追踪上游。
 4. 遇到 `function_ref` 就跳到 `function_definitions`。
-5. 遇到 `function_ref: unavailable` 时，明确说明该函数未展开。
+5. 对 Niagara 图按 `connections` 连接节点；遇到 `called_script` 时把它视为外部实现。
+6. 遇到 `function_ref: unavailable` 时，明确说明该函数未展开。

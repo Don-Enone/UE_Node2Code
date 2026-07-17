@@ -15,7 +15,9 @@
 #include "Misc/MessageDialog.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "NiagaraScript.h"
 #include "UE2CodeMaterialExporter.h"
+#include "UE2CodeNiagaraExporter.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
@@ -34,6 +36,15 @@ DEFINE_LOG_CATEGORY_STATIC(LogUE2Code, Log, All);
 namespace
 {
 	static const FName UE_Node2CodeExportTabName(TEXT("UE_Node2CodeExport"));
+	enum class EUE2CodeExportMode : int32
+	{
+		Material,
+		MaterialFunction,
+		NiagaraFunctionScript,
+		NiagaraModuleScript,
+		MaterialProperty,
+		MaterialNode
+	};
 
 	static void ApplyOptionalHierarchyDepth(const TArray<FString>& Args, int32 ArgIndex, FUE2CodeExportOptions& Options)
 	{
@@ -75,9 +86,11 @@ namespace
 		{
 			ModeOptions.Add(MakeShared<FString>(TEXT("Material")));
 			ModeOptions.Add(MakeShared<FString>(TEXT("Material Function")));
+			ModeOptions.Add(MakeShared<FString>(TEXT("Niagara Function Script")));
+			ModeOptions.Add(MakeShared<FString>(TEXT("Niagara Module Script")));
 			ModeOptions.Add(MakeShared<FString>(TEXT("Material Property")));
 			ModeOptions.Add(MakeShared<FString>(TEXT("Material Node")));
-			SelectedMode = ModeOptions[0];
+			SelectedMode = ModeOptions[static_cast<int32>(EUE2CodeExportMode::Material)];
 
 			ChildSlot
 			[
@@ -93,14 +106,14 @@ namespace
 						.Padding(0, 0, 0, 10)
 						[
 							SNew(STextBlock)
-							.Text(LOCTEXT("ExportTitle", "UE Node2Code Material Export"))
+							.Text(LOCTEXT("ExportTitle", "UE Node2Code Graph Export"))
 						]
 						+ SVerticalBox::Slot()
 						.AutoHeight()
 						.Padding(0, 3)
 						[
 							MakeTextBoxRow(
-								LOCTEXT("MaterialAsset", "Material / Function"),
+								LOCTEXT("GraphAsset", "Graph Asset"),
 								SAssignNew(MaterialPathTextBox, SEditableTextBox)
 								.Text(FText::FromString(TEXT("/Game/Test/MaterialTest")))
 							)
@@ -204,20 +217,28 @@ namespace
 						.AutoHeight()
 						.Padding(0, 3)
 						[
-							MakeWidgetRow(
-								LOCTEXT("HierarchyDepth", "Node Hierarchy Depth"),
-								SAssignNew(HierarchyDepthSpinBox, SSpinBox<int32>)
-								.MinValue(0)
-								.MaxValue(64)
-								.Value(0)
-								.ToolTipText(LOCTEXT("HierarchyDepthTip", "0 expands functions until basic nodes. 1 exports only the current graph. 2 expands first-level functions. Higher natural numbers expand deeper nested functions."))
-							)
+							SNew(SBox)
+							.Visibility(this, &SUE2CodeExportWidget::GetMaterialModeVisibility)
+							[
+								MakeWidgetRow(
+									LOCTEXT("HierarchyDepth", "Node Hierarchy Depth"),
+									SAssignNew(HierarchyDepthSpinBox, SSpinBox<int32>)
+									.MinValue(0)
+									.MaxValue(64)
+									.Value(0)
+									.ToolTipText(LOCTEXT("HierarchyDepthTip", "0 expands functions until basic nodes. 1 exports only the current graph. 2 expands first-level functions. Higher natural numbers expand deeper nested functions."))
+								)
+							]
 						]
 						+ SVerticalBox::Slot()
 						.AutoHeight()
 						.Padding(0, 8, 0, 0)
 						[
-							MakeCheckBoxRow(LOCTEXT("ExportUnreferenced", "Export Unreferenced Material Nodes"), bExportUnreferenced)
+							SNew(SBox)
+							.Visibility(this, &SUE2CodeExportWidget::GetUnreferencedVisibility)
+							[
+								MakeCheckBoxRow(LOCTEXT("ExportUnreferenced", "Export Unreferenced Material Nodes"), bExportUnreferenced)
+							]
 						]
 						+ SVerticalBox::Slot()
 						.AutoHeight()
@@ -312,19 +333,48 @@ namespace
 
 		EVisibility GetPropertyVisibility() const
 		{
-			return SelectedMode == ModeOptions[2] ? EVisibility::Visible : EVisibility::Collapsed;
+			return IsMode(EUE2CodeExportMode::MaterialProperty) ? EVisibility::Visible : EVisibility::Collapsed;
 		}
 
 		EVisibility GetNodeVisibility() const
 		{
-			return SelectedMode == ModeOptions[3] ? EVisibility::Visible : EVisibility::Collapsed;
+			return IsMode(EUE2CodeExportMode::MaterialNode) ? EVisibility::Visible : EVisibility::Collapsed;
+		}
+
+		EVisibility GetMaterialModeVisibility() const
+		{
+			return IsNiagaraMode() ? EVisibility::Collapsed : EVisibility::Visible;
+		}
+
+		EVisibility GetUnreferencedVisibility() const
+		{
+			return IsMode(EUE2CodeExportMode::Material) ? EVisibility::Visible : EVisibility::Collapsed;
+		}
+
+		bool IsMode(EUE2CodeExportMode Mode) const
+		{
+			return SelectedMode == ModeOptions[static_cast<int32>(Mode)];
+		}
+
+		bool IsNiagaraMode() const
+		{
+			return IsMode(EUE2CodeExportMode::NiagaraFunctionScript) || IsMode(EUE2CodeExportMode::NiagaraModuleScript);
+		}
+
+		void SetMode(EUE2CodeExportMode Mode)
+		{
+			SelectedMode = ModeOptions[static_cast<int32>(Mode)];
+			if (ModeComboBox.IsValid())
+			{
+				ModeComboBox->SetSelectedItem(SelectedMode);
+			}
 		}
 
 		FReply UseSelectedAsset()
 		{
 			if (!GEditor || !GEditor->GetSelectedObjects())
 			{
-				SetStatus(TEXT("No selected material or material function."));
+				SetStatus(TEXT("No selected supported graph asset."));
 				return FReply::Handled();
 			}
 
@@ -332,11 +382,35 @@ namespace
 			GEditor->GetSelectedObjects()->GetSelectedObjects(SelectedObjects);
 			for (UObject* Object : SelectedObjects)
 			{
+				if (UNiagaraScript* NiagaraScript = Cast<UNiagaraScript>(Object))
+				{
+					if (NiagaraScript->IsFunctionScript())
+					{
+						SetMode(EUE2CodeExportMode::NiagaraFunctionScript);
+						SetStatus(TEXT("Selected Niagara Function Script applied."));
+					}
+					else if (NiagaraScript->IsModuleScript())
+					{
+						SetMode(EUE2CodeExportMode::NiagaraModuleScript);
+						SetStatus(TEXT("Selected Niagara Module Script applied."));
+					}
+					else
+					{
+						SetStatus(TEXT("Selected Niagara script is neither a Function Script nor a Module Script."));
+						return FReply::Handled();
+					}
+					MaterialPathTextBox->SetText(FText::FromString(NiagaraScript->GetPathName()));
+					const FString ShortName = NiagaraScript->GetName();
+					OutputPathTextBox->SetText(FText::FromString(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / FString::Printf(TEXT("Codex/%s.ue2code.txt"), *ShortName))));
+					return FReply::Handled();
+				}
+
 				if (UMaterialInterface* Material = Cast<UMaterialInterface>(Object))
 				{
 					MaterialPathTextBox->SetText(FText::FromString(Material->GetPathName()));
 					const FString ShortName = Material->GetName();
 					OutputPathTextBox->SetText(FText::FromString(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / FString::Printf(TEXT("Codex/%s.ue2code.txt"), *ShortName))));
+					SetMode(EUE2CodeExportMode::Material);
 					SetStatus(TEXT("Selected material applied."));
 					return FReply::Handled();
 				}
@@ -346,17 +420,13 @@ namespace
 					MaterialPathTextBox->SetText(FText::FromString(MaterialFunction->GetPathName()));
 					const FString ShortName = MaterialFunction->GetName();
 					OutputPathTextBox->SetText(FText::FromString(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / FString::Printf(TEXT("Codex/%s.ue2code.txt"), *ShortName))));
-					SelectedMode = ModeOptions[1];
-					if (ModeComboBox.IsValid())
-					{
-						ModeComboBox->SetSelectedItem(SelectedMode);
-					}
+					SetMode(EUE2CodeExportMode::MaterialFunction);
 					SetStatus(TEXT("Selected material function applied."));
 					return FReply::Handled();
 				}
 			}
 
-			SetStatus(TEXT("Selection does not contain a material or material function."));
+			SetStatus(TEXT("Selection does not contain a material, material function, Niagara Function Script, or Niagara Module Script."));
 			return FReply::Handled();
 		}
 
@@ -408,20 +478,28 @@ namespace
 
 			FString Error;
 			bool bSuccess = false;
-			if (SelectedMode == ModeOptions[0])
+			if (IsMode(EUE2CodeExportMode::Material))
 			{
 				bSuccess = FUE2CodeMaterialExporter::ExportMaterialAssetPathToText(MaterialPath, OutputPath, Options, Error);
 			}
-			else if (SelectedMode == ModeOptions[1])
+			else if (IsMode(EUE2CodeExportMode::MaterialFunction))
 			{
 				bSuccess = FUE2CodeMaterialExporter::ExportMaterialFunctionAssetPathToText(MaterialPath, OutputPath, Options, Error);
+			}
+			else if (IsMode(EUE2CodeExportMode::NiagaraFunctionScript))
+			{
+				bSuccess = FUE2CodeNiagaraExporter::ExportNiagaraFunctionScriptAssetPathToText(MaterialPath, OutputPath, Options, Error);
+			}
+			else if (IsMode(EUE2CodeExportMode::NiagaraModuleScript))
+			{
+				bSuccess = FUE2CodeNiagaraExporter::ExportNiagaraModuleScriptAssetPathToText(MaterialPath, OutputPath, Options, Error);
 			}
 			else
 			{
 				UMaterialInterface* Material = LoadMaterialForExport(MaterialPath, Error);
 				if (Material)
 				{
-					if (SelectedMode == ModeOptions[2])
+					if (IsMode(EUE2CodeExportMode::MaterialProperty))
 					{
 						EMaterialProperty MaterialProperty = MP_MAX;
 						if (FUE2CodeMaterialExporter::ParseMaterialProperty(PropertyTextBox->GetText().ToString(), MaterialProperty))
@@ -572,6 +650,20 @@ void FUE2CodeModule::RegisterConsoleCommands()
 	));
 
 	ConsoleCommands.Add(ConsoleManager.RegisterConsoleCommand(
+		TEXT("UE_Node2Code.ExportNiagaraFunctionScript"),
+		TEXT("Exports a Niagara Function Script asset to AI-readable text. Args: <ScriptAssetPathOrUAssetFile> <OutputFilePath>"),
+		FConsoleCommandWithArgsDelegate::CreateRaw(this, &FUE2CodeModule::ExportNiagaraFunctionScriptCommand),
+		ECVF_Default
+	));
+
+	ConsoleCommands.Add(ConsoleManager.RegisterConsoleCommand(
+		TEXT("UE_Node2Code.ExportNiagaraModuleScript"),
+		TEXT("Exports a Niagara Module Script asset to AI-readable text. Args: <ScriptAssetPathOrUAssetFile> <OutputFilePath>"),
+		FConsoleCommandWithArgsDelegate::CreateRaw(this, &FUE2CodeModule::ExportNiagaraModuleScriptCommand),
+		ECVF_Default
+	));
+
+	ConsoleCommands.Add(ConsoleManager.RegisterConsoleCommand(
 		TEXT("UE_Node2Code.ExportMaterialProperty"),
 		TEXT("Exports one material property chain. Args: <MaterialAssetPathOrUAssetFile> <MaterialProperty> <OutputFilePath> [NodeHierarchyDepth]. Example property: MP_BaseColor"),
 		FConsoleCommandWithArgsDelegate::CreateRaw(this, &FUE2CodeModule::ExportMaterialPropertyCommand),
@@ -634,6 +726,46 @@ void FUE2CodeModule::ExportMaterialFunctionCommand(const TArray<FString>& Args)
 	if (FUE2CodeMaterialExporter::ExportMaterialFunctionAssetPathToText(Args[0], Args[1], Options, Error))
 	{
 		UE_LOG(LogUE2Code, Display, TEXT("Exported material function graph to %s"), *Args[1]);
+	}
+	else
+	{
+		UE_LOG(LogUE2Code, Error, TEXT("%s"), *Error);
+	}
+}
+
+void FUE2CodeModule::ExportNiagaraFunctionScriptCommand(const TArray<FString>& Args)
+{
+	if (Args.Num() < 2)
+	{
+		UE_LOG(LogUE2Code, Error, TEXT("Usage: UE_Node2Code.ExportNiagaraFunctionScript <ScriptAssetPathOrUAssetFile> <OutputFilePath>"));
+		return;
+	}
+
+	FString Error;
+	FUE2CodeExportOptions Options;
+	if (FUE2CodeNiagaraExporter::ExportNiagaraFunctionScriptAssetPathToText(Args[0], Args[1], Options, Error))
+	{
+		UE_LOG(LogUE2Code, Display, TEXT("Exported Niagara Function Script graph to %s"), *Args[1]);
+	}
+	else
+	{
+		UE_LOG(LogUE2Code, Error, TEXT("%s"), *Error);
+	}
+}
+
+void FUE2CodeModule::ExportNiagaraModuleScriptCommand(const TArray<FString>& Args)
+{
+	if (Args.Num() < 2)
+	{
+		UE_LOG(LogUE2Code, Error, TEXT("Usage: UE_Node2Code.ExportNiagaraModuleScript <ScriptAssetPathOrUAssetFile> <OutputFilePath>"));
+		return;
+	}
+
+	FString Error;
+	FUE2CodeExportOptions Options;
+	if (FUE2CodeNiagaraExporter::ExportNiagaraModuleScriptAssetPathToText(Args[0], Args[1], Options, Error))
+	{
+		UE_LOG(LogUE2Code, Display, TEXT("Exported Niagara Module Script graph to %s"), *Args[1]);
 	}
 	else
 	{
