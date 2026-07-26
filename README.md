@@ -510,4 +510,4 @@ The default target is web-based AI. It cannot read local asset files, so full pa
 
 ### License
 
-No open-source license has been specified yet. Add a `LICENSE` file before publishing the repository publicly.
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
