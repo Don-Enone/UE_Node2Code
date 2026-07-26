@@ -1,165 +1,176 @@
-# For AI to Read: UE Node2Code Export Text Rules
+# For AI to Read: UE Node2Code Export Rules
 
-This document is for AI readers. Follow these rules when reading `.ue2code.txt` files exported by `UE_Node2Code`.
+Use this guide when reading `.ue2code.txt`. The format preserves useful graph semantics while removing editor noise and redundant data.
 
-## 1. Core Rules
-
-- The export is structured source text for a Material or Material Function graph, not an asset path list.
-- `ME_MFC` means `MaterialExpressionMaterialFunctionCall`; it is not a basic computation node.
-- When you see `function_ref: FN001`, read the matching block in `function_definitions`.
-- Each function definition is written once. Multiple call sites reuse it through `function_ref`.
-- `function_ref: unavailable` means the function was not expanded. The reason is on the same line. Do not pretend to know its internals.
-- In Niagara exports, `called_script` is an external script reference; the current format does not include that script's internal graph.
-
-## 2. Header
+## 1. Format Versions
 
 ```text
-UE_NODE2CODE material_export version=2
-UE_NODE2CODE material_function_export version=2
-UE_NODE2CODE niagara_function_script_export version=1
-UE_NODE2CODE niagara_module_script_export version=1
-aliases:
-  ME=MaterialExpression; MF=MaterialFunction; ME_CM=MaterialExpressionComponentMask
+UE_NODE2CODE material_export version=3
+UE_NODE2CODE material_function_export version=3
+UE_NODE2CODE material_property_export version=3
+UE_NODE2CODE material_node_export version=3
+UE_NODE2CODE niagara_function_script_export version=2
+UE_NODE2CODE niagara_module_script_export version=2
 ```
 
-- `aliases` maps short names to full Unreal type names.
-- `ME_CM_23` means `MaterialExpressionComponentMask_23`.
-- `id` is the short node ID.
-- `type` is the short type name.
-- `role` describes the node role: `basic`, `function_call`, `function_input`, or `function_output`.
+Material exports may contain `type_aliases`, such as `ME_Mul=MaterialExpressionMultiply`. Interpret later short types and IDs through that table.
 
-## 3. Connections
+## 2. Shared Hierarchy Rule
 
-Normal node inputs:
+Every supported graph uses the same `hierarchy_depth`:
 
-```text
-inputs: index name from out mask rgba
-  0 "A" ME_TS_1 0 - -
-  1 "B" ME_C_2 0 1 1110
-```
+- `0`: recursively expand called graphs to basic nodes, subject to a safety limit.
+- `1`: export only the current root graph.
+- `2`: also expand graphs called directly by the root.
+- `N`: expand through hierarchy layer N.
 
-Function call inputs:
+The root is always layer 1. Material calls use `function_ref=FN...` into `function_definitions`; Niagara calls use `ref=NS...` into `called_graphs`. Each called graph is defined once and reused by every call site.
 
-```text
-call_inputs: index name from out mask rgba
-  0 "Number" ME_MFC_17 1 - -
-```
+`ref=external reason=depth_limit` or `function_ref: unavailable` means the implementation is not present. Do not infer it. `reason=recursive_call` points back to an existing definition and must not cause infinite traversal.
 
-Meaning:
+## 3. Material Graphs
 
-- `index`: input pin index on the current node.
-- `name`: input pin name on the current node.
-- `from`: upstream node ID.
-- `out`: upstream output index.
-- `mask rgba`: channel selection. `- -` means no channel restriction.
-
-Unconnected inputs are omitted.
-
-## 4. Root Outputs
-
-Material exports use:
+### Entry Points
 
 ```text
-material_outputs: property from out mask rgba
-```
+material_outputs:
+  - MP_BaseColor <- ME_Mul_18[0]
+  - MP_OpacityMask <- ME_SS_21[0] channels=R
 
-Direct Material Function exports use:
-
-```text
-function_outputs: name from out mask rgba
-```
-
-Both are reading entry points. Start from these outputs and follow `from` upstream.
-
-## 5. Outputs
-
-```text
-outputs: index name mask rgba
-  0 "RGB" 1 1110
-  1 "R" 1 1000
-```
-
-A single default output is usually omitted. Named or multiple outputs are listed.
-
-## 6. Material Functions
-
-Function call:
-
-```text
-material_function_call:
-  function_asset: DebugScalarValues
-  function_ref: FN002
-```
-
-Function definition:
-
-```text
-function_definitions:
-  function_definition_begin id=FN002 asset="DebugScalarValues"
-    internal_nodes:
-      node_begin ...
-      node_end
-  function_definition_end
-```
-
-Reading order:
-
-1. Read the call site's `call_inputs`.
-2. Jump to the matching `function_definition`.
-3. Inside the function, use `InputName` on `ME_FI` nodes and `OutputName` on `ME_FO` nodes to understand inputs and outputs.
-4. If the function contains another `ME_MFC`, follow its `function_ref` recursively.
-
-`call_output_bindings` is omitted. Infer output names from the call node `outputs` and `ME_FO` nodes in the function definition.
-
-## 7. Properties
-
-```text
-properties:
-  - Texture = T_IceDecal_normal
-  - SamplerType = SAMPLERTYPE_Normal
-```
-
-- Asset paths are shortened by default. The short name is a semantic hint, not a readable local path.
-- If a node has no non-default properties, `properties` is omitted.
-- Default values, empty values, editor UI state, GUIDs, and full object paths are usually omitted.
-
-## 8. Reroute And Layout
-
-- Passthrough Reroute nodes are omitted. `A -> Reroute -> B` is exported as `A -> B`.
-- `layout_hint` is only a rough layout hint, not execution order.
-- Internal nodes of built-in engine functions usually do not include layout information.
-
-## 9. Niagara Scripts
-
-Niagara Function and Module Script exports use generic nodes and pins. Function signatures use `function_inputs` / `function_outputs`; Module signatures use `module_inputs` / `module_outputs`:
-
-```text
-function_inputs:
-  - name="Probability" type=Float required=false default="0.5"
 function_outputs:
-  - name="Result" type=Bool
-nodes:
-  node_begin id=N001 type=Input
-    pins:
-      - out name="Probability" type=Float pin_id=11111111-1111-1111-1111-111111111111
-  node_end
-connections: from_node from_pin from_pin_id to_node to_pin to_pin_id
-  N001 "Probability" 11111111-1111-1111-1111-111111111111 N002 "A" 22222222-2222-2222-2222-222222222222
+  - "Result" <- ME_Add_7[0]
+
+root_connection: <- ME_Mul_18[0]
+root_node: ME_Mul_18
 ```
 
-- `usage` must match the format header: `Function` for `niagara_function_script_export`, or `Module` for `niagara_module_script_export`. Dynamic Inputs are rejected.
-- `in` / `out` are pin directions, `name` is the internal pin name, `display_name` is optional UI text, and `type` is the Niagara type.
-- Every pin has a stable `pin_id`. `connections` is the directed edge table from output pins to input pins and repeats both endpoint IDs, so display-name collisions are harmless.
-- An unconnected input may have a `default`; `default_ignored=true` means the compiler does not use the serialized default.
-- `enabled_state` is semantically significant: a `Disabled` node must not be interpreted as executing normally.
-- `called_script`, `called_script_path`, and `called_usage` identify a FunctionCall target; UE5 exports also include `called_script_version` when a version is selected. Its implementation is not recursively expanded.
-- `properties` contains non-default editable scalar properties plus required structural data such as Convert `Connections`, Static Switch settings, and propagated FunctionCall parameters. Custom HLSL text uses `\n` for line breaks.
+The right side of `<-` is the upstream node. Brackets identify its output index. Optional `channels=RGB/A/...` selects components.
 
-## 10. Recommended Reading Flow
+### Nodes
 
-1. For a Material export, check `node_hierarchy_depth`; Niagara Function/Module v1 has no hierarchy-depth field.
-2. Start from `material_outputs`, `function_outputs`, `root_connection`, or `root_node`.
-3. Trace upstream through `inputs` and `call_inputs`.
-4. When you see `function_ref`, jump to `function_definitions`.
-5. For Niagara graphs, connect nodes through `connections`; treat `called_script` as an external implementation.
-6. When you see `function_ref: unavailable`, state clearly that the function was not expanded.
+```text
+material_nodes: count=2
+  node ME_Mul_18 type=ME_Mul role=basic
+    caption: "Multiply"
+    inputs:
+      - [0] "A" <- ME_TS_2[0]
+      - [1] "B" <- ME_SP_5[0]
+    outputs:
+      - [0] "RGB" channels=RGB
+    properties:
+      - ConstA = 1
+```
+
+- `node <ID>` starts a node; indentation ends it, so no redundant end marker exists.
+- `role` is `basic`, `function_call`, `function_input`, or `function_output`.
+- Unconnected inputs are omitted from `inputs`. An effective fallback literal appears in `properties`.
+- A `Const*` fallback is omitted when its input is connected and the value is ineffective.
+- Parameter defaults and literal constants remain explicit, including `0` and `false`.
+- One unnamed default output is normally omitted; named or multiple outputs are listed.
+
+### Material Functions
+
+```text
+node ME_MFC_9 type=ME_MFC role=function_call
+  material_function_call:
+    function_asset: MF_Noise
+    function_ref: FN001
+    call_inputs:
+      - [0] "UV" <- ME_TC_1[0]
+
+function_definitions: count=1
+  function FN001 asset="MF_Noise"
+    internal_nodes:
+      node ME_FI_1 type=ME_FI role=function_input
+      node ME_FO_8 type=ME_FO role=function_output
+```
+
+Read `call_inputs`, then jump to the matching `function`. Node IDs inside a function are scoped to that function block.
+
+### Settings and Instance Overrides
+
+```text
+material_settings: domain=MD_Surface blend=BLEND_Masked shading=MSM_DefaultLit two_sided=false opacity_mask_clip=0.333
+effective_parameter_overrides:
+  - scalar name="Roughness" value=0.35
+  - texture name="NormalTexture" value=T_Normal
+  - static_switch name="UseDetail" value=true
+```
+
+Overrides are already merged through the inheritance chain, with child instances winning. Do not replace them with base-asset defaults.
+
+## 4. Niagara Graphs
+
+### Root and Signature
+
+```text
+graph:
+  script: "RandomBool"
+  usage: Function
+  hierarchy_depth: 2
+
+root_graph:
+  signature:
+    inputs:
+      - "Probability" : Float default="0.5"
+    outputs:
+      - "Result" : Bool
+```
+
+Top-level `usage` must match the Function or Module header. A top-level Dynamic Input is not an export entry point, but a called Dynamic Input may be expanded inside `called_graphs`.
+
+### Nodes, Pins, and Edges
+
+```text
+  nodes: count=2
+    node N001 type=Input title="Probability"
+      pins:
+        - P001 out "Probability" : Float
+    node N002 type=Op title="Less Than"
+      pins:
+        - P002 in "A" : Float
+  connections: count=1
+    - N001.P001 "Probability" -> N002.P002 "A"
+```
+
+- `N...` and `P...` are stable short IDs scoped to the current graph; numbering restarts in another `script NS...`.
+- Arrows always point from an output pin to an input pin.
+- `in` / `out` are directions; the value after `:` is the Niagara type.
+- `container=array|set|map`, `ref=true`, and `const=true` are meaningful type qualifiers.
+- An unconnected input may have `default`; `default_ignored=true` means the compiler ignores it.
+- Normal enabled state is omitted. Only non-default state appears as `state: Disabled/...`.
+
+### Called Scripts
+
+```text
+node N005 type=FunctionCall title="Safe Divide"
+  call: name="Safe Divide" usage=DynamicInput ref=NS001
+
+called_graphs: count=1
+  script NS001 name="SafeDivide" usage=DynamicInput
+    signature:
+      ...
+    nodes: count=...
+    connections: count=...
+```
+
+Follow every `ref=NS001` to its definition. Definitions are deduplicated. For `ref=external reason=depth_limit|safety_limit|unreadable_graph|missing_script`, report an external or unreadable implementation without inventing it.
+
+`properties` retains non-default editable data and required structural information such as Convert `Connections`, Static Switch settings, and propagated FunctionCall parameters. Custom HLSL line breaks use `\n`.
+
+## 5. Default Compaction
+
+- Material exports keep only nodes reachable from outputs by default.
+- Normal and Named Reroute passthrough nodes are inlined.
+- Timestamps, GUIDs, full object paths, positions, ordinary class defaults, and editor UI state are omitted by default.
+- Original Niagara node/pin GUIDs, object paths, positions, and version GUIDs appear only with `debug=true`.
+- Quotes, backslashes, newlines, and tabs are escaped as `\"`, `\\`, `\n`, and `\t`.
+
+## 6. Recommended Reading Flow
+
+1. Read the header, `hierarchy_depth`, and root graph type.
+2. Start at `material_outputs`, `function_outputs`, `root_connection`, `root_node`, or Niagara `root_graph`.
+3. Trace Material inputs upstream through `<-`; connect Niagara edges forward through `->`.
+4. Follow every `FN...` or `NS...` reference to its deduplicated definition.
+5. Distinguish effective properties and input defaults from omitted editor-only data.
+6. Preserve the unknown boundary of every `unavailable` or `ref=external`; never fabricate internal logic.

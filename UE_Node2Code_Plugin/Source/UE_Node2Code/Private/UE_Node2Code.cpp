@@ -217,18 +217,14 @@ namespace
 						.AutoHeight()
 						.Padding(0, 3)
 						[
-							SNew(SBox)
-							.Visibility(this, &SUE2CodeExportWidget::GetMaterialModeVisibility)
-							[
-								MakeWidgetRow(
-									LOCTEXT("HierarchyDepth", "Node Hierarchy Depth"),
-									SAssignNew(HierarchyDepthSpinBox, SSpinBox<int32>)
-									.MinValue(0)
-									.MaxValue(64)
-									.Value(0)
-									.ToolTipText(LOCTEXT("HierarchyDepthTip", "0 expands functions until basic nodes. 1 exports only the current graph. 2 expands first-level functions. Higher natural numbers expand deeper nested functions."))
-								)
-							]
+							MakeWidgetRow(
+								LOCTEXT("HierarchyDepth", "Node Hierarchy Depth"),
+								SAssignNew(HierarchyDepthSpinBox, SSpinBox<int32>)
+								.MinValue(0)
+								.MaxValue(64)
+								.Value(0)
+								.ToolTipText(LOCTEXT("HierarchyDepthTip", "Applies to every supported graph. 0 recursively expands called graphs to basic nodes. 1 exports only the current graph. 2 expands direct calls. Higher values expand deeper calls."))
+							)
 						]
 						+ SVerticalBox::Slot()
 						.AutoHeight()
@@ -341,24 +337,19 @@ namespace
 			return IsMode(EUE2CodeExportMode::MaterialNode) ? EVisibility::Visible : EVisibility::Collapsed;
 		}
 
-		EVisibility GetMaterialModeVisibility() const
-		{
-			return IsNiagaraMode() ? EVisibility::Collapsed : EVisibility::Visible;
-		}
-
 		EVisibility GetUnreferencedVisibility() const
 		{
 			return IsMode(EUE2CodeExportMode::Material) ? EVisibility::Visible : EVisibility::Collapsed;
 		}
 
-		bool IsMode(EUE2CodeExportMode Mode) const
-		{
-			return SelectedMode == ModeOptions[static_cast<int32>(Mode)];
-		}
-
 		bool IsNiagaraMode() const
 		{
 			return IsMode(EUE2CodeExportMode::NiagaraFunctionScript) || IsMode(EUE2CodeExportMode::NiagaraModuleScript);
+		}
+
+		bool IsMode(EUE2CodeExportMode Mode) const
+		{
+			return SelectedMode == ModeOptions[static_cast<int32>(Mode)];
 		}
 
 		void SetMode(EUE2CodeExportMode Mode)
@@ -547,7 +538,7 @@ namespace
 		TSharedPtr<SSpinBox<int32>> HierarchyDepthSpinBox;
 		TSharedPtr<SComboBox<TSharedPtr<FString>>> ModeComboBox;
 		TSharedPtr<STextBlock> StatusTextBlock;
-		bool bExportUnreferenced = true;
+		bool bExportUnreferenced = false;
 		bool bIncludeDebugMetadata = false;
 		bool bIncludeDefaultLikeProperties = false;
 	};
@@ -651,14 +642,14 @@ void FUE2CodeModule::RegisterConsoleCommands()
 
 	ConsoleCommands.Add(ConsoleManager.RegisterConsoleCommand(
 		TEXT("UE_Node2Code.ExportNiagaraFunctionScript"),
-		TEXT("Exports a Niagara Function Script asset to AI-readable text. Args: <ScriptAssetPathOrUAssetFile> <OutputFilePath>"),
+		TEXT("Exports a Niagara Function Script asset to AI-readable text. Args: <ScriptAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]"),
 		FConsoleCommandWithArgsDelegate::CreateRaw(this, &FUE2CodeModule::ExportNiagaraFunctionScriptCommand),
 		ECVF_Default
 	));
 
 	ConsoleCommands.Add(ConsoleManager.RegisterConsoleCommand(
 		TEXT("UE_Node2Code.ExportNiagaraModuleScript"),
-		TEXT("Exports a Niagara Module Script asset to AI-readable text. Args: <ScriptAssetPathOrUAssetFile> <OutputFilePath>"),
+		TEXT("Exports a Niagara Module Script asset to AI-readable text. Args: <ScriptAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]"),
 		FConsoleCommandWithArgsDelegate::CreateRaw(this, &FUE2CodeModule::ExportNiagaraModuleScriptCommand),
 		ECVF_Default
 	));
@@ -737,12 +728,13 @@ void FUE2CodeModule::ExportNiagaraFunctionScriptCommand(const TArray<FString>& A
 {
 	if (Args.Num() < 2)
 	{
-		UE_LOG(LogUE2Code, Error, TEXT("Usage: UE_Node2Code.ExportNiagaraFunctionScript <ScriptAssetPathOrUAssetFile> <OutputFilePath>"));
+		UE_LOG(LogUE2Code, Error, TEXT("Usage: UE_Node2Code.ExportNiagaraFunctionScript <ScriptAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]"));
 		return;
 	}
 
 	FString Error;
 	FUE2CodeExportOptions Options;
+	ApplyOptionalHierarchyDepth(Args, 2, Options);
 	if (FUE2CodeNiagaraExporter::ExportNiagaraFunctionScriptAssetPathToText(Args[0], Args[1], Options, Error))
 	{
 		UE_LOG(LogUE2Code, Display, TEXT("Exported Niagara Function Script graph to %s"), *Args[1]);
@@ -757,12 +749,13 @@ void FUE2CodeModule::ExportNiagaraModuleScriptCommand(const TArray<FString>& Arg
 {
 	if (Args.Num() < 2)
 	{
-		UE_LOG(LogUE2Code, Error, TEXT("Usage: UE_Node2Code.ExportNiagaraModuleScript <ScriptAssetPathOrUAssetFile> <OutputFilePath>"));
+		UE_LOG(LogUE2Code, Error, TEXT("Usage: UE_Node2Code.ExportNiagaraModuleScript <ScriptAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]"));
 		return;
 	}
 
 	FString Error;
 	FUE2CodeExportOptions Options;
+	ApplyOptionalHierarchyDepth(Args, 2, Options);
 	if (FUE2CodeNiagaraExporter::ExportNiagaraModuleScriptAssetPathToText(Args[0], Args[1], Options, Error))
 	{
 		UE_LOG(LogUE2Code, Display, TEXT("Exported Niagara Module Script graph to %s"), *Args[1]);

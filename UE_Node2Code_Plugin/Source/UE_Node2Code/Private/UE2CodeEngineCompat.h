@@ -110,9 +110,9 @@ namespace UE2CodeEngineCompat
 		}
 
 #if ENGINE_MAJOR_VERSION >= 5
-		Property->ExportText_Direct(OutValue, ValuePtr, nullptr, Parent, PPF_None);
+		Property->ExportText_Direct(OutValue, ValuePtr, ValuePtr, Parent, PPF_None);
 #else
-		Property->ExportTextItem(OutValue, ValuePtr, nullptr, Parent, PPF_None);
+		Property->ExportTextItem(OutValue, ValuePtr, ValuePtr, Parent, PPF_None);
 #endif
 	}
 

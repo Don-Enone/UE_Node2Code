@@ -2,9 +2,9 @@
 
 [中文](#中文) | [English](#english)
 
-UE Node2Code is an Unreal Engine 4.26+ editor plugin that exports Material, Material Function, Niagara Function Script, and Niagara Module Script graphs into compact, AI-readable text. It can recursively expand Material Functions, preserve Niagara node/pin/connection semantics, and produce text that is practical to paste into web-based AI chat tools.
+UE Node2Code is an Unreal Engine 4.26+ editor plugin that exports Material, Material Function, Niagara Function Script, and Niagara Module Script graphs into compact, AI-readable text. It recursively expands called Material and Niagara graphs through one shared hierarchy-depth rule and produces text that is practical to paste into web-based AI chat tools.
 
-Current test exports are compact enough for common AI chat windows: a material node with about 332 shader instructions exports to about 46 KB, and a material node with about 86 shader instructions exports to about 21 KB.
+Default exports are optimized for AI context windows: unreachable nodes, volatile metadata, ineffective fallbacks, and layout data are omitted unless explicitly requested.
 
 ## 中文
 
@@ -12,13 +12,13 @@ Current test exports are compact enough for common AI chat windows: a material n
 
 `UE_Node2Code` 用于把 UE 材质、材质函数、Niagara Function Script 和 Niagara Module Script 节点图导出为结构化文本，让 AI 能够阅读图的真实计算逻辑。
 
-它不会只停留在表层 `MaterialFunctionCall` 节点。默认情况下，插件会打开 Material Function，继续导出函数内部节点；如果内部还有嵌套函数，也会继续展开，直到只剩基础材质表达式节点，或达到用户设置的层级/深度限制。
+它不会只停留在表层调用节点。默认情况下，插件会打开 Material Function 或 Niagara FunctionCall 指向的脚本，继续导出内部图；嵌套调用也会按统一层级规则递归展开，直到基础节点或用户设置的深度限制。
 
 当前版本支持材质节点、Material Function、Niagara Function Script 和 Niagara Module Script 直接导出。蓝图节点暂未支持。
 
-源码目标是 UE 4.26 及后续版本通用。既有材质流程已在 UE 4.26 和 UE 5.7.4 验证编译和导出；本次 Niagara 支持已在 UE 4.26 验证编译、自动化测试和命令行导出，并在 UE 5.8 验证编译。
+源码目标是 UE 4.26 及后续版本通用。当前材质与 Niagara 导出已在 UE 4.26 和 UE 5.8 完成插件打包编译与自动化测试。
 
-当前测试中，约 332 条 shader instruction 的材质节点导出约 46 KB；约 86 条 shader instruction 的材质节点导出约 21 KB。这个体积通常适合直接复制到网页版 AI 对话窗口。
+默认导出针对 AI 上下文窗口做了裁剪：不可达节点、易变调试元数据、无效回退值和布局信息不会输出，除非用户显式启用对应选项。
 
 ### 主要功能
 
@@ -26,16 +26,19 @@ Current test exports are compact enough for common AI chat windows: a material n
 - 直接导出 Material Function 内部图。
 - 直接导出 Niagara Function Script，包含函数输入/输出、节点、引脚类型、默认值和连线。
 - 直接导出 Niagara Module Script，包含模块输入/输出以及完整图语义。
-- 记录 Niagara FunctionCall 引用的脚本资产和 Usage；当前不递归展开被调用的 Niagara 脚本。
+- 按层级递归展开 Niagara FunctionCall 指向的 Function、Module 或 Dynamic Input 图，并对定义去重。
 - 导出单个材质属性链，例如 `MP_BaseColor`、`MP_Normal`。
 - 导出单个材质节点的上游链。
 - 提供 UE 编辑器 GUI：`Window > UE Node2Code`。
 - 支持控制台命令和 C++/蓝图调用。
-- 支持 `NodeHierarchyDepth` 控制函数展开层级。
+- 支持 `NodeHierarchyDepth` 统一控制材质与 Niagara 被调用图的展开层级。
 - 同一个 Material Function 定义只导出一次，多次调用使用同一个 `function_ref`。
-- Reroute 透传节点会被内联，不作为独立计算节点输出。
-- 材质 v2 默认省略完整资源路径、GUID、精确坐标、未连接引脚和默认值；Niagara v1 会保留节点坐标、全部有效引脚、稳定引脚 ID、未连接输入默认值及显式连线，以免丢失图语义。
-- 使用 v2 精简格式：文件头别名表、短节点 ID、表格化输入/输出、资源短名。
+- 普通和 Named Reroute 透传节点会被内联，不作为独立计算节点输出。
+- 输出有效材质设置，以及 Material Instance / Material Function Instance 在继承链中最终生效的参数覆盖。
+- 材质 v3 默认省略完整资源路径、GUID、坐标、未连接引脚和无效默认值，但保留未连接输入当前实际使用的回退常量。Niagara v2 使用图内短节点/引脚 ID、箭头连线和去重的被调用图定义；原始 GUID 与坐标只在调试元数据模式输出。
+- 默认输出不含时间戳，并按稳定标识排序，便于缓存、比较和重复提交给 AI。
+- 整材质导出默认只包含能追溯到材质输出的节点；未引用节点需显式勾选后才输出。
+- 使用缩进式精简格式：短节点 ID、可读箭头连线、资源短名和去重定义。
 
 ### 仓库结构
 
@@ -83,10 +86,10 @@ Window > UE Node2Code
 | `Export Mode` | 选择材质、材质函数、Niagara Function/Module Script、属性链或节点链 |
 | `Material Property` | 属性模式下使用，例如 `MP_BaseColor` |
 | `Node Name` | 节点模式下使用，例如 `MaterialExpressionMultiply_3` |
-| `Node Hierarchy Depth` | 控制 Material Function 展开层级；Niagara 模式下隐藏 |
-| `Export Unreferenced Material Nodes` | 整材质导出时是否包含未被材质输出引用的节点 |
-| `Include Debug Metadata` | 输出对象路径、节点 GUID 等额外调试信息 |
-| `Include Default-Like Properties` | 输出节点属性中通常被过滤的默认值、空值等；不影响 Niagara 引脚默认值 |
+| `Node Hierarchy Depth` | 通用于全部图类型；控制 Material Function 和 Niagara 调用图的递归展开层级 |
+| `Export Unreferenced Material Nodes` | 是否包含未被材质输出引用的节点；默认关闭以避免无效文本 |
+| `Include Debug Metadata` | 输出对象路径、节点 GUID、时间戳和节点位置等额外调试信息 |
+| `Include Default-Like Properties` | 输出通常被过滤的普通默认/空属性；已连接输入对应的无效回退值仍会剔除，不影响 Niagara 引脚默认值 |
 
 ### 导出模式
 
@@ -103,16 +106,16 @@ Window > UE Node2Code
 
 | 值 | 含义 |
 | --- | --- |
-| `0` | 默认值，递归展开函数，直到基础节点或达到 `MaxFunctionDepth` |
-| `1` | 只记录当前材质图，不展开任何函数 |
-| `2` | 展开第一层 Material Function |
-| `3` | 展开第二层嵌套 Material Function |
-| `4...N` | 继续按自然数增加可展开的嵌套层级 |
+| `0` | 默认值，递归展开全部被调用图，直到基础节点或达到安全上限 |
+| `1` | 只记录当前根图，不展开任何调用 |
+| `2` | 展开根图直接调用的 Material Function / Niagara Script |
+| `3` | 再展开下一层嵌套调用 |
+| `4...N` | 继续按自然数增加可展开的图层级 |
 
-当层级限制阻止函数展开时，导出文本会写：
+当层级限制阻止展开时，材质写入 `function_ref: unavailable ...`，Niagara 写入：
 
 ```text
-function_ref: unavailable reason="NodeHierarchyDepth=..."
+call: name="..." usage=DynamicInput ref=external reason=depth_limit
 ```
 
 ### 控制台命令
@@ -120,8 +123,8 @@ function_ref: unavailable reason="NodeHierarchyDepth=..."
 ```text
 UE_Node2Code.ExportMaterial <MaterialAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]
 UE_Node2Code.ExportMaterialFunction <MaterialFunctionAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]
-UE_Node2Code.ExportNiagaraFunctionScript <ScriptAssetPathOrUAssetFile> <OutputFilePath>
-UE_Node2Code.ExportNiagaraModuleScript <ScriptAssetPathOrUAssetFile> <OutputFilePath>
+UE_Node2Code.ExportNiagaraFunctionScript <ScriptAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]
+UE_Node2Code.ExportNiagaraModuleScript <ScriptAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]
 UE_Node2Code.ExportMaterialProperty <MaterialAssetPathOrUAssetFile> <MaterialProperty> <OutputFilePath> [NodeHierarchyDepth]
 UE_Node2Code.ExportMaterialNode <MaterialAssetPathOrUAssetFile> <ExpressionObjectName> <OutputFilePath> [NodeHierarchyDepth]
 ```
@@ -131,8 +134,8 @@ UE_Node2Code.ExportMaterialNode <MaterialAssetPathOrUAssetFile> <ExpressionObjec
 ```text
 UE_Node2Code.ExportMaterial /Game/Test/MaterialTest C:/Temp/MaterialExport.ue2code.txt 0
 UE_Node2Code.ExportMaterialFunction /Engine/Functions/Engine_MaterialFunctions02/Utility/DebugFloat3Values C:/Temp/DebugFloat3Values.ue2code.txt 0
-UE_Node2Code.ExportNiagaraFunctionScript /Niagara/Functions/RandomBool.RandomBool C:/Temp/RandomBool.ue2code.txt
-UE_Node2Code.ExportNiagaraModuleScript /Niagara/Modules/Emitter/SpawnRate.SpawnRate C:/Temp/SpawnRate.ue2code.txt
+UE_Node2Code.ExportNiagaraFunctionScript /Niagara/Functions/RandomBool.RandomBool C:/Temp/RandomBool.ue2code.txt 0
+UE_Node2Code.ExportNiagaraModuleScript /Niagara/Modules/Emitter/SpawnRate.SpawnRate C:/Temp/SpawnRate.ue2code.txt 2
 UE_Node2Code.ExportMaterial /Game/Test/MaterialTest C:/Temp/MaterialExport.depth1.ue2code.txt 1
 UE_Node2Code.ExportMaterialProperty /Game/Test/MaterialTest MP_BaseColor C:/Temp/BaseColor.ue2code.txt 2
 ```
@@ -156,49 +159,58 @@ MP_PixelDepthOffset
 ### 输出格式示例
 
 ```text
-UE_NODE2CODE material_export version=2
-aliases:
+UE_NODE2CODE material_export version=3
+type_aliases:
   ME=MaterialExpression; MF=MaterialFunction; ME_TS=MaterialExpressionTextureSample
 
-material_outputs: property from out mask rgba
-  MP_EmissiveColor ME_MFC_2 0 - -
+material_settings: domain=MD_Surface blend=BLEND_Opaque shading=MSM_DefaultLit two_sided=false
+effective_parameter_overrides:
+  - scalar name="Roughness" value=0.35
+material_outputs:
+  - MP_EmissiveColor <- ME_MFC_2[0]
 
-node_begin id="ME_TS_1" type=ME_TS role=basic
-  caption: "Texture Sample"
-  outputs: index name mask rgba
-    0 "RGB" 1 1110
-    1 "R" 1 1000
-  properties:
-    - Texture = T_IceDecal_normal
-    - SamplerType = SAMPLERTYPE_Normal
-node_end
+material_nodes: count=1
+  node ME_TS_1 type=ME_TS role=basic
+    caption: "Texture Sample"
+    outputs:
+      - [0] "RGB" channels=RGB
+      - [1] "R" channels=R
+    properties:
+      - Texture = T_IceDecal_normal
+      - SamplerType = SAMPLERTYPE_Normal
 ```
 
-Niagara Function Script 与 Module Script 使用独立的 v1 格式，并共享节点/引脚/连线结构：
+Niagara Function Script 与 Module Script 使用 v2 格式，并共享签名、短 ID、箭头连线和被调用图定义：
 
 ```text
-UE_NODE2CODE niagara_function_script_export version=1
-niagara_function_script: ExampleFunction
-usage: Function
-function_inputs:
-  - name="Probability" type=Float required=false ...
-nodes:
-  node_begin id=N001 type=Input
-    pins:
-      - out name="Probability" type=Float pin_id=11111111-1111-1111-1111-111111111111
-  node_end
-connections: from_node from_pin from_pin_id to_node to_pin to_pin_id
-  N001 "Probability" 11111111-1111-1111-1111-111111111111 N002 "A" 22222222-2222-2222-2222-222222222222
+UE_NODE2CODE niagara_function_script_export version=2
+graph:
+  script: "ExampleFunction"
+  usage: Function
+  hierarchy_depth: 2
+root_graph:
+  signature:
+    inputs:
+      - "Probability" : Float default="0.5"
+    outputs:
+      - "Result" : Bool
+  nodes: count=2
+    node N001 type=Input title="Probability"
+      pins:
+        - P001 out "Probability" : Float
+  connections: count=1
+    - N001.P001 "Probability" -> N002.P002 "A"
+called_graphs: count=1
+  script NS001 name="NestedFunction" usage=DynamicInput
 ```
 
-Module Script 使用对应的头与签名字段：
+Module Script 使用对应的头；内部结构相同：
 
 ```text
-UE_NODE2CODE niagara_module_script_export version=1
-niagara_module_script: SpawnRate
-usage: Module
-module_inputs:
-module_outputs:
+UE_NODE2CODE niagara_module_script_export version=2
+graph:
+  script: "SpawnRate"
+  usage: Module
 ```
 
 AI 阅读规则见：
@@ -253,13 +265,13 @@ ForAitoRead_en.md
 
 `UE_Node2Code` exports Unreal Engine Material, Material Function, Niagara Function Script, and Niagara Module Script graphs into structured text so AI tools can read their actual logic.
 
-It does not stop at surface-level `MaterialFunctionCall` nodes. By default, the plugin expands Material Functions, exports their internal nodes, and continues into nested functions until only basic material expressions remain, or until the configured depth limit is reached.
+It does not stop at surface-level call nodes. By default, the plugin opens Material Functions and Niagara FunctionCall targets, exports their internal graphs, and recursively follows nested calls until basic nodes or the configured hierarchy limit.
 
 The current version supports Material nodes, direct Material Function export, Niagara Function Script export, and Niagara Module Script export. Blueprint nodes are not supported yet.
 
-The source target is Unreal Engine 4.26 and later. The existing Material flow has been verified locally for build and export on UE 4.26 and UE 5.7.4. This Niagara support has been verified by build, automation test, and command-line export on UE 4.26, plus compilation on UE 5.8.
+The source target is Unreal Engine 4.26 and later. The current Material and Niagara exporters have passed plugin packaging builds and automation tests on UE 4.26 and UE 5.8.
 
-In current tests, a material node with about 332 shader instructions exports to about 46 KB, and a material node with about 86 shader instructions exports to about 21 KB. This is usually small enough to paste into a web-based AI chat window.
+Default exports are pruned for AI context windows: unreachable nodes, volatile debug metadata, ineffective fallbacks, and layout data are omitted unless explicitly requested.
 
 ### Features
 
@@ -267,16 +279,19 @@ In current tests, a material node with about 332 shader instructions exports to 
 - Export a Material Function graph directly.
 - Export a Niagara Function Script with its signature, nodes, pin types, defaults, and connections.
 - Export a Niagara Module Script with its module inputs/outputs and complete graph semantics.
-- Record referenced scripts and usages on Niagara FunctionCall nodes; referenced Niagara scripts are not recursively expanded yet.
+- Recursively expand Niagara FunctionCall targets, including Function, Module, and Dynamic Input graphs, with deduplicated definitions.
 - Export one material property chain, such as `MP_BaseColor` or `MP_Normal`.
 - Export the upstream chain of one material expression.
 - Editor GUI: `Window > UE Node2Code`.
 - Console commands and C++/Blueprint callable APIs.
-- Function expansion depth control through `NodeHierarchyDepth`.
+- Shared Material/Niagara called-graph expansion control through `NodeHierarchyDepth`.
 - Deduplicate repeated Material Function definitions with `function_ref`.
-- Inline passthrough Reroute nodes.
-- Material v2 omits full asset paths, GUIDs, exact coordinates, unconnected pins, and defaults by default. Niagara v1 keeps node coordinates, every valid pin, stable pin IDs, unconnected-input defaults, and explicit connections so graph semantics are not lost.
-- Compact v2 output format: alias table, short node IDs, tabular inputs/outputs, and short asset names.
+- Inline normal and Named Reroute passthrough nodes.
+- Export effective material settings and parameter overrides inherited by Material Instances and Material Function Instances.
+- Material v3 omits full asset paths, GUIDs, coordinates, unconnected pins, and ineffective defaults while retaining effective fallback constants. Niagara v2 uses graph-local short node/pin IDs, arrow edges, and deduplicated called-graph definitions; original GUIDs and coordinates are debug-only.
+- Omit timestamps and use stable ordering by default so exports are cacheable and diff-friendly.
+- Full-material exports contain only nodes reachable from material outputs by default; exporting unreferenced nodes is opt-in.
+- Compact indented output: short node IDs, readable arrow edges, short asset names, and deduplicated definitions.
 
 ### Repository Layout
 
@@ -324,10 +339,10 @@ Window options:
 | `Export Mode` | Select Material, Material Function, Niagara Function/Module Script, property-chain, or node-chain export |
 | `Material Property` | Used in property mode, for example `MP_BaseColor` |
 | `Node Name` | Used in node mode, for example `MaterialExpressionMultiply_3` |
-| `Node Hierarchy Depth` | Controls Material Function expansion; hidden in Niagara mode |
-| `Export Unreferenced Material Nodes` | Include nodes not referenced by material outputs during full-material export |
-| `Include Debug Metadata` | Include object paths, node GUIDs, and other extra debug metadata |
-| `Include Default-Like Properties` | Include default or empty node-property values that are usually filtered; Niagara pin defaults are unaffected |
+| `Node Hierarchy Depth` | Applies to every graph type; controls Material Function and Niagara called-graph expansion |
+| `Export Unreferenced Material Nodes` | Include nodes not referenced by material outputs; off by default to avoid irrelevant text |
+| `Include Debug Metadata` | Include object paths, node GUIDs, timestamps, positions, and other debug metadata |
+| `Include Default-Like Properties` | Include ordinary default or empty properties that are usually filtered; ineffective fallbacks for connected inputs remain omitted, and Niagara pin defaults are unaffected |
 
 ### Export Modes
 
@@ -344,16 +359,16 @@ Window options:
 
 | Value | Meaning |
 | --- | --- |
-| `0` | Default. Recursively expand functions until basic nodes or `MaxFunctionDepth` |
-| `1` | Current material graph only; do not expand functions |
-| `2` | Expand first-level Material Functions only |
-| `3` | Expand second-level nested Material Functions |
-| `4...N` | Continue increasing the allowed nested expansion depth with any natural number |
+| `0` | Default. Recursively expand all called graphs until basic nodes or the safety limit |
+| `1` | Current root graph only; do not expand calls |
+| `2` | Expand Material Functions / Niagara Scripts called directly by the root |
+| `3` | Also expand the next nested call layer |
+| `4...N` | Continue increasing the allowed graph hierarchy depth |
 
-When a function is not expanded because of the depth limit, the output contains:
+When a call is not expanded because of the depth limit, Material uses `function_ref: unavailable ...`; Niagara uses:
 
 ```text
-function_ref: unavailable reason="NodeHierarchyDepth=..."
+call: name="..." usage=DynamicInput ref=external reason=depth_limit
 ```
 
 ### Console Commands
@@ -361,8 +376,8 @@ function_ref: unavailable reason="NodeHierarchyDepth=..."
 ```text
 UE_Node2Code.ExportMaterial <MaterialAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]
 UE_Node2Code.ExportMaterialFunction <MaterialFunctionAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]
-UE_Node2Code.ExportNiagaraFunctionScript <ScriptAssetPathOrUAssetFile> <OutputFilePath>
-UE_Node2Code.ExportNiagaraModuleScript <ScriptAssetPathOrUAssetFile> <OutputFilePath>
+UE_Node2Code.ExportNiagaraFunctionScript <ScriptAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]
+UE_Node2Code.ExportNiagaraModuleScript <ScriptAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]
 UE_Node2Code.ExportMaterialProperty <MaterialAssetPathOrUAssetFile> <MaterialProperty> <OutputFilePath> [NodeHierarchyDepth]
 UE_Node2Code.ExportMaterialNode <MaterialAssetPathOrUAssetFile> <ExpressionObjectName> <OutputFilePath> [NodeHierarchyDepth]
 ```
@@ -372,8 +387,8 @@ Examples:
 ```text
 UE_Node2Code.ExportMaterial /Game/Test/MaterialTest C:/Temp/MaterialExport.ue2code.txt 0
 UE_Node2Code.ExportMaterialFunction /Engine/Functions/Engine_MaterialFunctions02/Utility/DebugFloat3Values C:/Temp/DebugFloat3Values.ue2code.txt 0
-UE_Node2Code.ExportNiagaraFunctionScript /Niagara/Functions/RandomBool.RandomBool C:/Temp/RandomBool.ue2code.txt
-UE_Node2Code.ExportNiagaraModuleScript /Niagara/Modules/Emitter/SpawnRate.SpawnRate C:/Temp/SpawnRate.ue2code.txt
+UE_Node2Code.ExportNiagaraFunctionScript /Niagara/Functions/RandomBool.RandomBool C:/Temp/RandomBool.ue2code.txt 0
+UE_Node2Code.ExportNiagaraModuleScript /Niagara/Modules/Emitter/SpawnRate.SpawnRate C:/Temp/SpawnRate.ue2code.txt 2
 UE_Node2Code.ExportMaterial /Game/Test/MaterialTest C:/Temp/MaterialExport.depth1.ue2code.txt 1
 UE_Node2Code.ExportMaterialProperty /Game/Test/MaterialTest MP_BaseColor C:/Temp/BaseColor.ue2code.txt 2
 ```
@@ -397,49 +412,58 @@ MP_PixelDepthOffset
 ### Output Format Example
 
 ```text
-UE_NODE2CODE material_export version=2
-aliases:
+UE_NODE2CODE material_export version=3
+type_aliases:
   ME=MaterialExpression; MF=MaterialFunction; ME_TS=MaterialExpressionTextureSample
 
-material_outputs: property from out mask rgba
-  MP_EmissiveColor ME_MFC_2 0 - -
+material_settings: domain=MD_Surface blend=BLEND_Opaque shading=MSM_DefaultLit two_sided=false
+effective_parameter_overrides:
+  - scalar name="Roughness" value=0.35
+material_outputs:
+  - MP_EmissiveColor <- ME_MFC_2[0]
 
-node_begin id="ME_TS_1" type=ME_TS role=basic
-  caption: "Texture Sample"
-  outputs: index name mask rgba
-    0 "RGB" 1 1110
-    1 "R" 1 1000
-  properties:
-    - Texture = T_IceDecal_normal
-    - SamplerType = SAMPLERTYPE_Normal
-node_end
+material_nodes: count=1
+  node ME_TS_1 type=ME_TS role=basic
+    caption: "Texture Sample"
+    outputs:
+      - [0] "RGB" channels=RGB
+      - [1] "R" channels=R
+    properties:
+      - Texture = T_IceDecal_normal
+      - SamplerType = SAMPLERTYPE_Normal
 ```
 
-Niagara Function Scripts and Module Scripts use separate v1 headers while sharing the node/pin/connection structure:
+Niagara Function Scripts and Module Scripts use v2 signatures, short IDs, arrow edges, and called-graph definitions:
 
 ```text
-UE_NODE2CODE niagara_function_script_export version=1
-niagara_function_script: ExampleFunction
-usage: Function
-function_inputs:
-  - name="Probability" type=Float required=false ...
-nodes:
-  node_begin id=N001 type=Input
-    pins:
-      - out name="Probability" type=Float pin_id=11111111-1111-1111-1111-111111111111
-  node_end
-connections: from_node from_pin from_pin_id to_node to_pin to_pin_id
-  N001 "Probability" 11111111-1111-1111-1111-111111111111 N002 "A" 22222222-2222-2222-2222-222222222222
+UE_NODE2CODE niagara_function_script_export version=2
+graph:
+  script: "ExampleFunction"
+  usage: Function
+  hierarchy_depth: 2
+root_graph:
+  signature:
+    inputs:
+      - "Probability" : Float default="0.5"
+    outputs:
+      - "Result" : Bool
+  nodes: count=2
+    node N001 type=Input title="Probability"
+      pins:
+        - P001 out "Probability" : Float
+  connections: count=1
+    - N001.P001 "Probability" -> N002.P002 "A"
+called_graphs: count=1
+  script NS001 name="NestedFunction" usage=DynamicInput
 ```
 
-Module Scripts use the corresponding header and signature fields:
+Module Scripts use the corresponding header and the same internal structure:
 
 ```text
-UE_NODE2CODE niagara_module_script_export version=1
-niagara_module_script: SpawnRate
-usage: Module
-module_inputs:
-module_outputs:
+UE_NODE2CODE niagara_module_script_export version=2
+graph:
+  script: "SpawnRate"
+  usage: Module
 ```
 
 AI reading rules:

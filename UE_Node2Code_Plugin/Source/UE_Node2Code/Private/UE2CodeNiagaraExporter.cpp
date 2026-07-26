@@ -18,6 +18,7 @@
 #include "NiagaraScriptSource.h"
 #include "Runtime/Launch/Resources/Version.h"
 #include "UE2CodeEngineCompat.h"
+#include "UE2CodeTextFormat.h"
 #include "UObject/UnrealType.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -45,18 +46,12 @@ namespace UE2CodeNiagaraExporterPrivate
 
 	static FString Escape(FString Value)
 	{
-		Value.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
-		Value.ReplaceInline(TEXT("\""), TEXT("\\\""));
-		Value.ReplaceInline(TEXT("\r\n"), TEXT("\\n"));
-		Value.ReplaceInline(TEXT("\n"), TEXT("\\n"));
-		Value.ReplaceInline(TEXT("\r"), TEXT("\\n"));
-		Value.ReplaceInline(TEXT("\t"), TEXT("\\t"));
-		return Value;
+		return UE2CodeTextFormat::Escape(MoveTemp(Value));
 	}
 
 	static FString Quote(const FString& Value)
 	{
-		return FString::Printf(TEXT("\"%s\""), *Escape(Value));
+		return UE2CodeTextFormat::Quote(Value);
 	}
 
 	template <typename EnumType>
@@ -86,7 +81,7 @@ namespace UE2CodeNiagaraExporterPrivate
 			return TEXT("None");
 		}
 		const FString Name = Pin->PinName.ToString();
-		return Name.IsEmpty() ? Pin->PinId.ToString(EGuidFormats::DigitsWithHyphens) : Name;
+		return Name.IsEmpty() ? TEXT("<unnamed>") : Name;
 	}
 
 	static FString PinDisplayName(const UEdGraphPin* Pin)
@@ -248,16 +243,128 @@ namespace UE2CodeNiagaraExporterPrivate
 	{
 		Nodes.Sort([](const UEdGraphNode& A, const UEdGraphNode& B)
 		{
-			if (A.NodePosX == B.NodePosX)
+			if (A.NodeGuid.IsValid() && B.NodeGuid.IsValid() && A.NodeGuid != B.NodeGuid)
 			{
-				if (A.NodePosY == B.NodePosY)
-				{
-					return A.GetName() < B.GetName();
-				}
-				return A.NodePosY < B.NodePosY;
+				return A.NodeGuid < B.NodeGuid;
 			}
-			return A.NodePosX < B.NodePosX;
+			return A.GetName() < B.GetName();
 		});
+	}
+
+	static UNiagaraGraph* GetScriptGraph(UNiagaraScript* Script)
+	{
+		UNiagaraScriptSource* Source = GetScriptSource(Script);
+		return Source ? Source->NodeGraph : nullptr;
+	}
+
+	static void GetSortedNodes(UNiagaraGraph* Graph, TArray<UEdGraphNode*>& OutNodes)
+	{
+		OutNodes.Reset();
+		if (!Graph)
+		{
+			return;
+		}
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (Node)
+			{
+				OutNodes.Add(Node);
+			}
+		}
+		SortNodes(OutNodes);
+	}
+
+	struct FCallResolution
+	{
+		FString Reference;
+		FString Reason;
+	};
+
+	struct FNiagaraExportContext
+	{
+		explicit FNiagaraExportContext(const FUE2CodeExportOptions& InOptions, UNiagaraScript* InRootScript)
+			: Options(InOptions)
+			, RootScript(InRootScript)
+		{
+			if (RootScript)
+			{
+				ScriptIds.Add(RootScript, TEXT("ROOT"));
+				ScriptStack.Add(RootScript);
+			}
+		}
+
+		const FUE2CodeExportOptions& Options;
+		UNiagaraScript* RootScript = nullptr;
+		TMap<const UNiagaraScript*, FString> ScriptIds;
+		TArray<UNiagaraScript*> ScriptDefinitions;
+		TArray<const UNiagaraScript*> ScriptStack;
+		TMap<const UNiagaraNodeFunctionCall*, FCallResolution> CallResolutions;
+		int32 NextScriptId = 1;
+	};
+
+	static void RegisterCalledScripts(UNiagaraScript* Script, FNiagaraExportContext& Context)
+	{
+		UNiagaraGraph* Graph = GetScriptGraph(Script);
+		TArray<UEdGraphNode*> Nodes;
+		GetSortedNodes(Graph, Nodes);
+
+		for (UEdGraphNode* Node : Nodes)
+		{
+			const UNiagaraNodeFunctionCall* FunctionCall = Cast<UNiagaraNodeFunctionCall>(Node);
+			if (!FunctionCall)
+			{
+				continue;
+			}
+
+			FCallResolution Resolution;
+			UNiagaraScript* CalledScript = FunctionCall->FunctionScript;
+			if (!CalledScript)
+			{
+				Resolution.Reason = TEXT("missing_script");
+				Context.CallResolutions.Add(FunctionCall, MoveTemp(Resolution));
+				continue;
+			}
+
+			if (const FString* ExistingId = Context.ScriptIds.Find(CalledScript))
+			{
+				Resolution.Reference = *ExistingId;
+				if (Context.ScriptStack.Contains(CalledScript))
+				{
+					Resolution.Reason = TEXT("recursive_call");
+				}
+				Context.CallResolutions.Add(FunctionCall, MoveTemp(Resolution));
+				continue;
+			}
+
+			const int32 TargetLayer = Context.ScriptStack.Num() + 1;
+			if (Context.Options.NodeHierarchyDepth > 0 && TargetLayer > Context.Options.NodeHierarchyDepth)
+			{
+				Resolution.Reason = TEXT("depth_limit");
+				Context.CallResolutions.Add(FunctionCall, MoveTemp(Resolution));
+				continue;
+			}
+			if (Context.Options.NodeHierarchyDepth == 0 && TargetLayer > FMath::Max(1, Context.Options.MaxFunctionDepth))
+			{
+				Resolution.Reason = TEXT("safety_limit");
+				Context.CallResolutions.Add(FunctionCall, MoveTemp(Resolution));
+				continue;
+			}
+			if (!GetScriptGraph(CalledScript))
+			{
+				Resolution.Reason = TEXT("unreadable_graph");
+				Context.CallResolutions.Add(FunctionCall, MoveTemp(Resolution));
+				continue;
+			}
+
+			Resolution.Reference = FString::Printf(TEXT("NS%03d"), Context.NextScriptId++);
+			Context.ScriptIds.Add(CalledScript, Resolution.Reference);
+			Context.ScriptDefinitions.Add(CalledScript);
+			Context.CallResolutions.Add(FunctionCall, Resolution);
+
+			Context.ScriptStack.Add(CalledScript);
+			RegisterCalledScripts(CalledScript, Context);
+			Context.ScriptStack.Pop();
+		}
 	}
 
 	static bool IsSemanticNiagaraProperty(const FProperty* Property)
@@ -319,6 +426,40 @@ namespace UE2CodeNiagaraExporterPrivate
 			&& (!Property->HasAnyPropertyFlags(CPF_Edit) || !IsSupportedScalarProperty(Property));
 	}
 
+	static void RemoveSerializedField(FString& Value, const FString& FieldName)
+	{
+		const FString Prefix = FieldName + TEXT("=");
+		int32 SearchFrom = 0;
+		while (SearchFrom < Value.Len())
+		{
+			const int32 FieldStart = Value.Find(Prefix, ESearchCase::CaseSensitive, ESearchDir::FromStart, SearchFrom);
+			if (FieldStart == INDEX_NONE)
+			{
+				break;
+			}
+
+			const int32 CommaIndex = Value.Find(TEXT(","), ESearchCase::CaseSensitive, ESearchDir::FromStart, FieldStart + Prefix.Len());
+			if (CommaIndex == INDEX_NONE)
+			{
+				break;
+			}
+			Value.RemoveAt(FieldStart, CommaIndex - FieldStart + 1);
+			SearchFrom = FieldStart;
+		}
+	}
+
+	static FString CompactSemanticPropertyValue(const FProperty* Property, FString Value)
+	{
+		if (Property && Property->GetFName() == FName(TEXT("Connections")))
+		{
+			RemoveSerializedField(Value, TEXT("SourcePinId"));
+			RemoveSerializedField(Value, TEXT("DestinationPinId"));
+			Value.ReplaceInline(TEXT("SourcePath="), TEXT("from="));
+			Value.ReplaceInline(TEXT("DestinationPath="), TEXT("to="));
+		}
+		return Value;
+	}
+
 	static void AppendEditableProperties(UNiagaraNode* Node, FString& OutText, int32 Depth, const FUE2CodeExportOptions& Options)
 	{
 		if (!Node)
@@ -351,6 +492,7 @@ namespace UE2CodeNiagaraExporterPrivate
 				{
 					UE2CodeEngineCompat::ExportPropertyText(Property, Value, ValuePtr, Node);
 				}
+				Value = CompactSemanticPropertyValue(Property, MoveTemp(Value));
 				if (!Options.bIncludeDefaultLikeProperties && (Value.IsEmpty() || Value == TEXT("None") || Value == TEXT("()")))
 				{
 					continue;
@@ -368,7 +510,7 @@ namespace UE2CodeNiagaraExporterPrivate
 		}
 	}
 
-	static void AppendScriptSignature(const TArray<UEdGraphNode*>& Nodes, ENiagaraScriptUsage ScriptUsage, const FString& SignaturePrefix, FString& OutText)
+	static void AppendScriptSignature(const TArray<UEdGraphNode*>& Nodes, ENiagaraScriptUsage ScriptUsage, FString& OutText, int32 Depth)
 	{
 		TArray<UNiagaraNodeInput*> Inputs;
 		TArray<UNiagaraNodeOutput*> Outputs;
@@ -397,24 +539,36 @@ namespace UE2CodeNiagaraExporterPrivate
 				: A.CallSortPriority < B.CallSortPriority;
 		});
 
-		const FString InputsLabel = SignaturePrefix + TEXT("_inputs:");
-		AppendLine(OutText, 0, Inputs.Num() > 0 ? InputsLabel : InputsLabel + TEXT(" none"));
+		AppendLine(OutText, Depth, TEXT("signature:"));
+		AppendLine(OutText, Depth + 1, Inputs.Num() > 0 ? TEXT("inputs:") : TEXT("inputs: none"));
 		for (const UNiagaraNodeInput* Input : Inputs)
 		{
 			FString Line = FString::Printf(
-				TEXT("- name=%s type=%s required=%s auto_bind=%s hidden=%s sort_priority=%d"),
+				TEXT("- %s : %s"),
 				*Quote(Input->Input.GetName().ToString()),
-				*VariableTypeName(Input->Input),
-				Input->ExposureOptions.bRequired ? TEXT("true") : TEXT("false"),
-				Input->ExposureOptions.bCanAutoBind ? TEXT("true") : TEXT("false"),
-				Input->ExposureOptions.bHidden ? TEXT("true") : TEXT("false"),
-				Input->CallSortPriority);
+				*VariableTypeName(Input->Input));
 			const FString DefaultValue = VariableDefaultValue(Input->Input);
 			if (!DefaultValue.IsEmpty())
 			{
 				Line += TEXT(" default=") + Quote(DefaultValue);
 			}
-			AppendLine(OutText, 1, Line);
+			if (Input->ExposureOptions.bRequired)
+			{
+				Line += TEXT(" required");
+			}
+			if (Input->ExposureOptions.bCanAutoBind)
+			{
+				Line += TEXT(" auto_bind");
+			}
+			if (Input->ExposureOptions.bHidden)
+			{
+				Line += TEXT(" hidden");
+			}
+			if (Input->CallSortPriority != 0)
+			{
+				Line += FString::Printf(TEXT(" sort=%d"), Input->CallSortPriority);
+			}
+			AppendLine(OutText, Depth + 2, Line);
 		}
 
 		int32 OutputCount = 0;
@@ -422,90 +576,205 @@ namespace UE2CodeNiagaraExporterPrivate
 		{
 			OutputCount += Output->GetOutputs().Num();
 		}
-		const FString OutputsLabel = SignaturePrefix + TEXT("_outputs:");
-		AppendLine(OutText, 0, OutputCount > 0 ? OutputsLabel : OutputsLabel + TEXT(" none"));
+		AppendLine(OutText, Depth + 1, OutputCount > 0 ? TEXT("outputs:") : TEXT("outputs: none"));
 		for (const UNiagaraNodeOutput* Output : Outputs)
 		{
 			for (const FNiagaraVariable& Variable : Output->GetOutputs())
 			{
-				AppendLine(OutText, 1, FString::Printf(TEXT("- name=%s type=%s"), *Quote(Variable.GetName().ToString()), *VariableTypeName(Variable)));
+				AppendLine(OutText, Depth + 2, FString::Printf(TEXT("- %s : %s"), *Quote(Variable.GetName().ToString()), *VariableTypeName(Variable)));
 			}
 		}
 	}
 
-	static void AppendNode(const UEdGraphNode* Node, const TMap<const UEdGraphNode*, FString>& NodeIds, FString& OutText, const FUE2CodeExportOptions& Options)
+	struct FConnection
+	{
+		FString FromNode;
+		FString FromPin;
+		FString FromPinId;
+		FString ToNode;
+		FString ToPin;
+		FString ToPinId;
+	};
+
+	struct FGraphExportData
+	{
+		TArray<UEdGraphNode*> Nodes;
+		TMap<const UEdGraphNode*, FString> NodeIds;
+		TMap<const UEdGraphPin*, FString> PinIds;
+		TArray<FConnection> Connections;
+	};
+
+	static void GatherConnections(const FGraphExportData& Data, TArray<FConnection>& OutConnections)
+	{
+		for (const UEdGraphNode* Node : Data.Nodes)
+		{
+			for (const UEdGraphPin* Pin : Node->Pins)
+			{
+				if (!Pin || IsAddPin(Pin) || Pin->Direction != EGPD_Output)
+				{
+					continue;
+				}
+				for (const UEdGraphPin* LinkedPin : Pin->LinkedTo)
+				{
+					const UEdGraphNode* LinkedNode = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
+					if (!LinkedPin || LinkedPin->Direction != EGPD_Input || !Data.NodeIds.Contains(LinkedNode))
+					{
+						continue;
+					}
+					const FString* FromPinId = Data.PinIds.Find(Pin);
+					const FString* ToPinId = Data.PinIds.Find(LinkedPin);
+					if (!FromPinId || !ToPinId)
+					{
+						continue;
+					}
+
+					FConnection& Connection = OutConnections.AddDefaulted_GetRef();
+					Connection.FromNode = Data.NodeIds.FindChecked(Node);
+					Connection.FromPin = PinInternalName(Pin);
+					Connection.FromPinId = *FromPinId;
+					Connection.ToNode = Data.NodeIds.FindChecked(LinkedNode);
+					Connection.ToPin = PinInternalName(LinkedPin);
+					Connection.ToPinId = *ToPinId;
+				}
+			}
+		}
+
+		OutConnections.Sort([](const FConnection& A, const FConnection& B)
+		{
+			const FString AKey = A.FromNode + TEXT("|") + A.FromPinId + TEXT("|") + A.ToNode + TEXT("|") + A.ToPinId;
+			const FString BKey = B.FromNode + TEXT("|") + B.FromPinId + TEXT("|") + B.ToNode + TEXT("|") + B.ToPinId;
+			return AKey < BKey;
+		});
+	}
+
+	static void BuildGraphExportData(UNiagaraGraph* Graph, FGraphExportData& OutData)
+	{
+		GetSortedNodes(Graph, OutData.Nodes);
+		for (int32 NodeIndex = 0; NodeIndex < OutData.Nodes.Num(); ++NodeIndex)
+		{
+			const UEdGraphNode* Node = OutData.Nodes[NodeIndex];
+			OutData.NodeIds.Add(Node, FString::Printf(TEXT("N%03d"), NodeIndex + 1));
+		}
+
+		int32 PinIndex = 1;
+		for (const UEdGraphNode* Node : OutData.Nodes)
+		{
+			for (const UEdGraphPin* Pin : Node->Pins)
+			{
+				if (Pin && !IsAddPin(Pin))
+				{
+					OutData.PinIds.Add(Pin, FString::Printf(TEXT("P%03d"), PinIndex++));
+				}
+			}
+		}
+		GatherConnections(OutData, OutData.Connections);
+	}
+
+	static void AppendNode(
+		const UEdGraphNode* Node,
+		const FGraphExportData& Data,
+		FString& OutText,
+		int32 Depth,
+		FNiagaraExportContext& Context)
 	{
 		if (!Node)
 		{
 			return;
 		}
 
-		const FString& NodeId = NodeIds.FindChecked(Node);
-		AppendLine(OutText, 1, FString::Printf(TEXT("node_begin id=%s type=%s"), *NodeId, *NodeTypeName(Node)));
-		AppendLine(OutText, 2, FString::Printf(TEXT("title: %s"), *Quote(Node->GetNodeTitle(ENodeTitleType::ListView).ToString())));
-		AppendLine(OutText, 2, FString::Printf(TEXT("position: x=%d y=%d"), Node->NodePosX, Node->NodePosY));
-		AppendLine(OutText, 2, FString::Printf(TEXT("enabled_state: %s"), LexToString(Node->GetDesiredEnabledState())));
+		const FString& NodeId = Data.NodeIds.FindChecked(Node);
+		AppendLine(
+			OutText,
+			Depth,
+			FString::Printf(
+				TEXT("node %s type=%s title=%s"),
+				*NodeId,
+				*NodeTypeName(Node),
+				*Quote(Node->GetNodeTitle(ENodeTitleType::ListView).ToString())));
+		if (Node->GetDesiredEnabledState() != ENodeEnabledState::Enabled)
+		{
+			AppendLine(OutText, Depth + 1, FString::Printf(TEXT("state: %s"), LexToString(Node->GetDesiredEnabledState())));
+		}
 		if (!Node->NodeComment.IsEmpty())
 		{
-			AppendLine(OutText, 2, FString::Printf(TEXT("comment: %s"), *Quote(Node->NodeComment)));
+			AppendLine(OutText, Depth + 1, FString::Printf(TEXT("comment: %s"), *Quote(Node->NodeComment)));
 		}
-		if (Options.bIncludeDebugMetadata)
+		if (Context.Options.bIncludeDebugMetadata)
 		{
-			AppendLine(OutText, 2, FString::Printf(TEXT("object_name: %s"), *Quote(Node->GetName())));
-			AppendLine(OutText, 2, FString::Printf(TEXT("node_guid: %s"), *Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens)));
+			AppendLine(OutText, Depth + 1, FString::Printf(TEXT("debug: position=(%d,%d) object=%s guid=%s"), Node->NodePosX, Node->NodePosY, *Quote(Node->GetName()), *Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens)));
 		}
 
 		if (const UNiagaraNodeInput* Input = Cast<UNiagaraNodeInput>(Node))
 		{
 			FString Line = FString::Printf(
-				TEXT("niagara_input: name=%s type=%s usage=%s exposed=%s required=%s"),
+				TEXT("input: %s : %s usage=%s"),
 				*Quote(Input->Input.GetName().ToString()),
 				*VariableTypeName(Input->Input),
-				*EnumName(Input->Usage),
-				Input->ExposureOptions.bExposed ? TEXT("true") : TEXT("false"),
-				Input->ExposureOptions.bRequired ? TEXT("true") : TEXT("false"));
+				*EnumName(Input->Usage));
 			const FString DefaultValue = VariableDefaultValue(Input->Input);
 			if (!DefaultValue.IsEmpty())
 			{
 				Line += TEXT(" default=") + Quote(DefaultValue);
 			}
-			AppendLine(OutText, 2, Line);
+			if (Input->ExposureOptions.bExposed)
+			{
+				Line += TEXT(" exposed");
+			}
+			if (Input->ExposureOptions.bRequired)
+			{
+				Line += TEXT(" required");
+			}
+			AppendLine(OutText, Depth + 1, Line);
 		}
 		else if (const UNiagaraNodeOutput* Output = Cast<UNiagaraNodeOutput>(Node))
 		{
-			AppendLine(OutText, 2, FString::Printf(TEXT("niagara_output: usage=%s output_count=%d"), *EnumName(Output->GetUsage()), Output->GetOutputs().Num()));
+			AppendLine(OutText, Depth + 1, FString::Printf(TEXT("output: usage=%s values=%d"), *EnumName(Output->GetUsage()), Output->GetOutputs().Num()));
 		}
 
 		if (const UNiagaraNodeOp* Operation = Cast<UNiagaraNodeOp>(Node))
 		{
-			AppendLine(OutText, 2, FString::Printf(TEXT("operation: %s"), *Quote(Operation->OpName.ToString())));
+			AppendLine(OutText, Depth + 1, FString::Printf(TEXT("operation: %s"), *Quote(Operation->OpName.ToString())));
 		}
 		if (const UNiagaraNodeFunctionCall* FunctionCall = Cast<UNiagaraNodeFunctionCall>(Node))
 		{
 			const FString FunctionName = FunctionCall->GetFunctionName();
-			if (!FunctionName.IsEmpty())
-			{
-				AppendLine(OutText, 2, FString::Printf(TEXT("function_name: %s"), *Quote(FunctionName)));
-			}
+			FString Line = TEXT("call:");
+			Line += TEXT(" name=") + Quote(FunctionName.IsEmpty() && FunctionCall->FunctionScript ? FunctionCall->FunctionScript->GetName() : FunctionName);
 			if (FunctionCall->FunctionScript)
 			{
-				AppendLine(OutText, 2, FString::Printf(TEXT("called_script: %s"), *FunctionCall->FunctionScript->GetName()));
-				AppendLine(OutText, 2, FString::Printf(TEXT("called_script_path: %s"), *Quote(FunctionCall->FunctionScript->GetPathName())));
-				AppendLine(OutText, 2, FString::Printf(TEXT("called_usage: %s"), *EnumName(FunctionCall->FunctionScript->GetUsage())));
+				Line += TEXT(" usage=") + EnumName(FunctionCall->FunctionScript->GetUsage());
+			}
+			const FCallResolution* Resolution = Context.CallResolutions.Find(FunctionCall);
+			if (Resolution && !Resolution->Reference.IsEmpty())
+			{
+				Line += TEXT(" ref=") + Resolution->Reference;
+			}
+			else
+			{
+				Line += TEXT(" ref=external");
+			}
+			if (Resolution && !Resolution->Reason.IsEmpty())
+			{
+				Line += TEXT(" reason=") + Resolution->Reason;
+			}
+			AppendLine(OutText, Depth + 1, Line);
+			if (FunctionCall->FunctionScript && Context.Options.bIncludeDebugMetadata)
+			{
+				AppendLine(OutText, Depth + 1, FString::Printf(TEXT("called_script_path: %s"), *Quote(FunctionCall->FunctionScript->GetPathName())));
 			#if ENGINE_MAJOR_VERSION >= 5
 				if (FunctionCall->SelectedScriptVersion.IsValid())
 				{
-					AppendLine(OutText, 2, FString::Printf(TEXT("called_script_version: %s"), *FunctionCall->SelectedScriptVersion.ToString(EGuidFormats::DigitsWithHyphens)));
+					AppendLine(OutText, Depth + 1, FString::Printf(TEXT("called_script_version: %s"), *FunctionCall->SelectedScriptVersion.ToString(EGuidFormats::DigitsWithHyphens)));
 				}
 			#endif
 			}
-			else if (!FunctionCall->FunctionScriptAssetObjectPath.IsNone())
+			else if (!FunctionCall->FunctionScriptAssetObjectPath.IsNone() && Context.Options.bIncludeDebugMetadata)
 			{
-				AppendLine(OutText, 2, FString::Printf(TEXT("called_script_path: %s"), *Quote(FunctionCall->FunctionScriptAssetObjectPath.ToString())));
+				AppendLine(OutText, Depth + 1, FString::Printf(TEXT("called_script_path: %s"), *Quote(FunctionCall->FunctionScriptAssetObjectPath.ToString())));
 			}
 		}
 
-		AppendEditableProperties(Cast<UNiagaraNode>(const_cast<UEdGraphNode*>(Node)), OutText, 2, Options);
+		AppendEditableProperties(Cast<UNiagaraNode>(const_cast<UEdGraphNode*>(Node)), OutText, Depth + 1, Context.Options);
 
 		int32 PinCount = 0;
 		FString PinText;
@@ -515,17 +784,46 @@ namespace UE2CodeNiagaraExporterPrivate
 			{
 				continue;
 			}
+			const FString* PinId = Data.PinIds.Find(Pin);
+			if (!PinId)
+			{
+				continue;
+			}
 			FString Line = FString::Printf(
-				TEXT("- %s name=%s type=%s"),
+				TEXT("- %s %s %s : %s"),
+				**PinId,
 				Pin->Direction == EGPD_Input ? TEXT("in") : TEXT("out"),
 				*Quote(PinInternalName(Pin)),
 				*PinTypeName(Pin));
+			if (Pin->PinType.IsArray())
+			{
+				Line += TEXT(" container=array");
+			}
+			else if (Pin->PinType.IsSet())
+			{
+				Line += TEXT(" container=set");
+			}
+			else if (Pin->PinType.IsMap())
+			{
+				Line += TEXT(" container=map");
+			}
+			if (Pin->PinType.bIsReference)
+			{
+				Line += TEXT(" ref=true");
+			}
+			if (Pin->PinType.bIsConst)
+			{
+				Line += TEXT(" const=true");
+			}
 			const FString DisplayName = PinDisplayName(Pin);
 			if (!DisplayName.IsEmpty() && DisplayName != PinInternalName(Pin))
 			{
 				Line += TEXT(" display_name=") + Quote(DisplayName);
 			}
-			Line += TEXT(" pin_id=") + Pin->PinId.ToString(EGuidFormats::DigitsWithHyphens);
+			if (Context.Options.bIncludeDebugMetadata)
+			{
+				Line += TEXT(" guid=") + Pin->PinId.ToString(EGuidFormats::DigitsWithHyphens);
+			}
 			if (Pin->bHidden)
 			{
 				Line += TEXT(" hidden=true");
@@ -549,58 +847,44 @@ namespace UE2CodeNiagaraExporterPrivate
 					}
 				}
 			}
-			AppendLine(PinText, 3, Line);
+			AppendLine(PinText, Depth + 2, Line);
 			++PinCount;
 		}
-		AppendLine(OutText, 2, PinCount > 0 ? TEXT("pins:") : TEXT("pins: none"));
+		AppendLine(OutText, Depth + 1, PinCount > 0 ? TEXT("pins:") : TEXT("pins: none"));
 		OutText += PinText;
-		AppendLine(OutText, 1, TEXT("node_end"));
 	}
 
-	struct FConnection
+	static void AppendGraphContent(
+		UNiagaraScript* Script,
+		UNiagaraGraph* Graph,
+		FString& OutText,
+		int32 Depth,
+		FNiagaraExportContext& Context)
 	{
-		FString FromNode;
-		FString FromPin;
-		FString FromPinId;
-		FString ToNode;
-		FString ToPin;
-		FString ToPinId;
-	};
-
-	static void GatherConnections(const TArray<UEdGraphNode*>& Nodes, const TMap<const UEdGraphNode*, FString>& NodeIds, TArray<FConnection>& OutConnections)
-	{
-		for (const UEdGraphNode* Node : Nodes)
+		FGraphExportData Data;
+		BuildGraphExportData(Graph, Data);
+		AppendScriptSignature(Data.Nodes, Script->GetUsage(), OutText, Depth);
+		AppendLine(OutText, Depth, FString::Printf(TEXT("nodes: count=%d"), Data.Nodes.Num()));
+		for (const UEdGraphNode* Node : Data.Nodes)
 		{
-			for (const UEdGraphPin* Pin : Node->Pins)
-			{
-				if (!Pin || IsAddPin(Pin) || Pin->Direction != EGPD_Output)
-				{
-					continue;
-				}
-				for (const UEdGraphPin* LinkedPin : Pin->LinkedTo)
-				{
-					const UEdGraphNode* LinkedNode = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
-					if (!LinkedPin || LinkedPin->Direction != EGPD_Input || !NodeIds.Contains(LinkedNode))
-					{
-						continue;
-					}
-					FConnection& Connection = OutConnections.AddDefaulted_GetRef();
-					Connection.FromNode = NodeIds.FindChecked(Node);
-					Connection.FromPin = PinInternalName(Pin);
-					Connection.FromPinId = Pin->PinId.ToString(EGuidFormats::DigitsWithHyphens);
-					Connection.ToNode = NodeIds.FindChecked(LinkedNode);
-					Connection.ToPin = PinInternalName(LinkedPin);
-					Connection.ToPinId = LinkedPin->PinId.ToString(EGuidFormats::DigitsWithHyphens);
-				}
-			}
+			AppendNode(Node, Data, OutText, Depth + 1, Context);
 		}
 
-		OutConnections.Sort([](const FConnection& A, const FConnection& B)
+		AppendLine(OutText, Depth, Data.Connections.Num() > 0 ? FString::Printf(TEXT("connections: count=%d"), Data.Connections.Num()) : TEXT("connections: none"));
+		for (const FConnection& Connection : Data.Connections)
 		{
-			const FString AKey = A.FromNode + TEXT("|") + A.FromPinId + TEXT("|") + A.ToNode + TEXT("|") + A.ToPinId;
-			const FString BKey = B.FromNode + TEXT("|") + B.FromPinId + TEXT("|") + B.ToNode + TEXT("|") + B.ToPinId;
-			return AKey < BKey;
-		});
+			AppendLine(
+				OutText,
+				Depth + 1,
+				FString::Printf(
+					TEXT("- %s.%s %s -> %s.%s %s"),
+					*Connection.FromNode,
+					*Connection.FromPinId,
+					*Quote(Connection.FromPin),
+					*Connection.ToNode,
+					*Connection.ToPinId,
+					*Quote(Connection.ToPin)));
+		}
 	}
 
 	static FString ScriptKindToken(ENiagaraScriptUsage Usage)
@@ -626,62 +910,69 @@ namespace UE2CodeNiagaraExporterPrivate
 			return false;
 		}
 
-		UNiagaraScriptSource* Source = GetScriptSource(Script);
-		UNiagaraGraph* Graph = Source ? Source->NodeGraph : nullptr;
+		UNiagaraGraph* Graph = GetScriptGraph(Script);
 		if (!Graph)
 		{
 			OutError = FString::Printf(TEXT("%s '%s' has no readable editor graph."), *ScriptKindDisplayName(ExpectedUsage), *Script->GetName());
 			return false;
 		}
 
-		TArray<UEdGraphNode*> Nodes;
-		for (UEdGraphNode* Node : Graph->Nodes)
-		{
-			if (Node)
-			{
-				Nodes.Add(Node);
-			}
-		}
-		SortNodes(Nodes);
-
-		TMap<const UEdGraphNode*, FString> NodeIds;
-		for (int32 NodeIndex = 0; NodeIndex < Nodes.Num(); ++NodeIndex)
-		{
-			NodeIds.Add(Nodes[NodeIndex], FString::Printf(TEXT("N%03d"), NodeIndex + 1));
-		}
-
-		TArray<FConnection> Connections;
-		GatherConnections(Nodes, NodeIds, Connections);
+		FNiagaraExportContext Context(Options, Script);
+		RegisterCalledScripts(Script, Context);
 
 		const FString KindToken = ScriptKindToken(ExpectedUsage);
 		OutText.Reset();
-		AppendLine(OutText, 0, FString::Printf(TEXT("UE_NODE2CODE niagara_%s_script_export version=1"), *KindToken));
-		AppendLine(OutText, 0, FString::Printf(TEXT("engine_version: %s"), *FEngineVersion::Current().ToString()));
-		AppendLine(OutText, 0, FString::Printf(TEXT("niagara_%s_script: %s"), *KindToken, *Script->GetName()));
-		AppendLine(OutText, 0, FString::Printf(TEXT("usage: %s"), *EnumName(Script->GetUsage())));
+		AppendLine(OutText, 0, FString::Printf(TEXT("UE_NODE2CODE niagara_%s_script_export version=2"), *KindToken));
+		AppendLine(OutText, 0, TEXT("graph:"));
+		AppendLine(OutText, 1, FString::Printf(TEXT("script: %s"), *Quote(Script->GetName())));
+		AppendLine(OutText, 1, FString::Printf(TEXT("usage: %s"), *EnumName(Script->GetUsage())));
+		AppendLine(OutText, 1, FString::Printf(TEXT("hierarchy_depth: %d"), Options.NodeHierarchyDepth));
 		if (Options.bIncludeDebugMetadata)
 		{
-			AppendLine(OutText, 0, FString::Printf(TEXT("asset_path: %s"), *Quote(Script->GetPathName())));
-			AppendLine(OutText, 0, FString::Printf(TEXT("graph_path: %s"), *Quote(Graph->GetPathName())));
+			AppendLine(OutText, 1, FString::Printf(TEXT("engine_version: %s"), *FEngineVersion::Current().ToString()));
+			AppendLine(OutText, 1, FString::Printf(TEXT("asset_path: %s"), *Quote(Script->GetPathName())));
+			AppendLine(OutText, 1, FString::Printf(TEXT("graph_path: %s"), *Quote(Graph->GetPathName())));
 		}
-		AppendLine(OutText, 0, FString::Printf(TEXT("options: include_debug_metadata=%s include_default_like_properties=%s"), Options.bIncludeDebugMetadata ? TEXT("true") : TEXT("false"), Options.bIncludeDefaultLikeProperties ? TEXT("true") : TEXT("false")));
-		AppendLine(OutText, 0, TEXT(""));
-
-		AppendScriptSignature(Nodes, ExpectedUsage, KindToken, OutText);
-		AppendLine(OutText, 0, TEXT(""));
-		AppendLine(OutText, 0, FString::Printf(TEXT("node_count: %d"), Nodes.Num()));
-		AppendLine(OutText, 0, TEXT("nodes:"));
-		for (const UEdGraphNode* Node : Nodes)
-		{
-			AppendNode(Node, NodeIds, OutText, Options);
-		}
+		AppendLine(
+			OutText,
+			1,
+			FString::Printf(
+				TEXT("options: debug=%s default_properties=%s"),
+				Options.bIncludeDebugMetadata ? TEXT("true") : TEXT("false"),
+				Options.bIncludeDefaultLikeProperties ? TEXT("true") : TEXT("false")));
 
 		AppendLine(OutText, 0, TEXT(""));
-		AppendLine(OutText, 0, FString::Printf(TEXT("connection_count: %d"), Connections.Num()));
-		AppendLine(OutText, 0, Connections.Num() > 0 ? TEXT("connections: from_node from_pin from_pin_id to_node to_pin to_pin_id") : TEXT("connections: none"));
-		for (const FConnection& Connection : Connections)
+		AppendLine(OutText, 0, TEXT("root_graph:"));
+		AppendGraphContent(Script, Graph, OutText, 1, Context);
+
+		AppendLine(OutText, 0, TEXT(""));
+		AppendLine(
+			OutText,
+			0,
+			Context.ScriptDefinitions.Num() > 0
+				? FString::Printf(TEXT("called_graphs: count=%d"), Context.ScriptDefinitions.Num())
+				: TEXT("called_graphs: none"));
+		for (UNiagaraScript* DefinitionScript : Context.ScriptDefinitions)
 		{
-			AppendLine(OutText, 1, FString::Printf(TEXT("%s %s %s %s %s %s"), *Connection.FromNode, *Quote(Connection.FromPin), *Connection.FromPinId, *Connection.ToNode, *Quote(Connection.ToPin), *Connection.ToPinId));
+			UNiagaraGraph* DefinitionGraph = GetScriptGraph(DefinitionScript);
+			if (!DefinitionGraph)
+			{
+				continue;
+			}
+			const FString DefinitionId = Context.ScriptIds.FindRef(DefinitionScript);
+			AppendLine(
+				OutText,
+				1,
+				FString::Printf(
+					TEXT("script %s name=%s usage=%s"),
+					*DefinitionId,
+					*Quote(DefinitionScript->GetName()),
+					*EnumName(DefinitionScript->GetUsage())));
+			if (Options.bIncludeDebugMetadata)
+			{
+				AppendLine(OutText, 2, FString::Printf(TEXT("asset_path: %s"), *Quote(DefinitionScript->GetPathName())));
+			}
+			AppendGraphContent(DefinitionScript, DefinitionGraph, OutText, 2, Context);
 		}
 
 		OutError.Reset();
@@ -759,15 +1050,33 @@ bool FUE2CodeNiagaraScriptExportTest::RunTest(const FString& Parameters)
 	FString Error;
 	FUE2CodeExportOptions Options;
 	TestTrue(TEXT("A Niagara Function Script exports to text"), FUE2CodeNiagaraExporter::ExportNiagaraFunctionScriptToString(FunctionScript, Options, Text, Error));
-	TestTrue(TEXT("The export has the Niagara Function Script header"), Text.Contains(TEXT("UE_NODE2CODE niagara_function_script_export version=1")));
+	TestTrue(TEXT("The export has the Niagara Function Script header"), Text.Contains(TEXT("UE_NODE2CODE niagara_function_script_export version=2")));
 	TestTrue(TEXT("The export reports Function usage"), Text.Contains(TEXT("usage: Function")));
-	TestTrue(TEXT("The export contains the function signature"), Text.Contains(TEXT("function_inputs:")) && Text.Contains(TEXT("function_outputs:")) && Text.Contains(TEXT(" type=")));
-	TestTrue(TEXT("The export contains nodes"), Text.Contains(TEXT("node_begin")));
-	TestFalse(TEXT("The export contains at least one connection"), Text.Contains(TEXT("connection_count: 0")));
-	TestTrue(TEXT("Pins have stable identities"), Text.Contains(TEXT(" pin_id=")));
-	TestTrue(TEXT("Connections use stable pin identities"), Text.Contains(TEXT("connections: from_node from_pin from_pin_id to_node to_pin to_pin_id")));
-	TestTrue(TEXT("Function-call assets are recorded"), Text.Contains(TEXT("called_script: ")) && Text.Contains(TEXT("called_script_path: ")) && Text.Contains(TEXT("called_usage: ")));
+	TestTrue(TEXT("The export contains a readable signature"), Text.Contains(TEXT("signature:")) && Text.Contains(TEXT("inputs:")) && Text.Contains(TEXT("outputs:")) && Text.Contains(TEXT(" : ")));
+	TestTrue(TEXT("The export contains nodes"), Text.Contains(TEXT("node N")));
+	TestTrue(TEXT("The export contains at least one connection"), Text.Contains(TEXT("connections: count=")));
+	TestTrue(TEXT("Pins use graph-local short identities"), Text.Contains(TEXT("- P")));
+	TestTrue(TEXT("Connections use readable arrows and short identities"), Text.Contains(TEXT(" -> ")) && Text.Contains(TEXT(".P")));
+	TestTrue(TEXT("Function-call graphs are referenced and expanded"), Text.Contains(TEXT("call: name=")) && Text.Contains(TEXT(" ref=NS")) && Text.Contains(TEXT("called_graphs: count=")));
+	TestFalse(TEXT("Default output omits called-script object paths"), Text.Contains(TEXT("called_script_path:")));
 	TestTrue(TEXT("Convert-node internal wiring is recorded"), Text.Contains(TEXT("- Connections = ")));
+	TestFalse(TEXT("Convert-node wiring omits redundant internal GUIDs"), Text.Contains(TEXT("SourcePinId=")) || Text.Contains(TEXT("DestinationPinId=")));
+	TestTrue(TEXT("Convert-node wiring keeps readable source/destination paths"), Text.Contains(TEXT("from=")) && Text.Contains(TEXT("to=")));
+
+	FUE2CodeExportOptions RootOnlyOptions;
+	RootOnlyOptions.NodeHierarchyDepth = 1;
+	FString RootOnlyText;
+	Error.Reset();
+	TestTrue(TEXT("Hierarchy depth 1 exports the root Niagara graph"), FUE2CodeNiagaraExporter::ExportNiagaraFunctionScriptToString(FunctionScript, RootOnlyOptions, RootOnlyText, Error));
+	TestTrue(TEXT("Hierarchy depth 1 leaves calls external"), RootOnlyText.Contains(TEXT("ref=external reason=depth_limit")));
+	TestTrue(TEXT("Hierarchy depth 1 emits no called graph definitions"), RootOnlyText.Contains(TEXT("called_graphs: none")));
+
+	FUE2CodeExportOptions DirectCallOptions;
+	DirectCallOptions.NodeHierarchyDepth = 2;
+	FString DirectCallText;
+	Error.Reset();
+	TestTrue(TEXT("Hierarchy depth 2 exports direct Niagara calls"), FUE2CodeNiagaraExporter::ExportNiagaraFunctionScriptToString(FunctionScript, DirectCallOptions, DirectCallText, Error));
+	TestTrue(TEXT("Hierarchy depth 2 emits direct called graph definitions"), DirectCallText.Contains(TEXT("ref=NS")) && DirectCallText.Contains(TEXT("called_graphs: count=")));
 
 	UNiagaraScript* ModuleScript = LoadObject<UNiagaraScript>(nullptr, TEXT("/Niagara/Modules/Emitter/SpawnRate.SpawnRate"));
 	if (!TestNotNull(TEXT("The engine SpawnRate Niagara Module Script is available"), ModuleScript))
@@ -777,11 +1086,11 @@ bool FUE2CodeNiagaraScriptExportTest::RunTest(const FString& Parameters)
 	Text.Reset();
 	Error.Reset();
 	TestTrue(TEXT("A Niagara Module Script exports to text"), FUE2CodeNiagaraExporter::ExportNiagaraModuleScriptToString(ModuleScript, Options, Text, Error));
-	TestTrue(TEXT("The export has the Niagara Module Script header"), Text.Contains(TEXT("UE_NODE2CODE niagara_module_script_export version=1")));
+	TestTrue(TEXT("The export has the Niagara Module Script header"), Text.Contains(TEXT("UE_NODE2CODE niagara_module_script_export version=2")));
 	TestTrue(TEXT("The export reports Module usage"), Text.Contains(TEXT("usage: Module")));
-	TestTrue(TEXT("The export contains the module signature"), Text.Contains(TEXT("module_inputs:")) && Text.Contains(TEXT("module_outputs:")) && Text.Contains(TEXT(" type=")));
-	TestTrue(TEXT("The module export contains nodes"), Text.Contains(TEXT("node_begin")));
-	TestFalse(TEXT("The module export contains at least one connection"), Text.Contains(TEXT("connection_count: 0")));
+	TestTrue(TEXT("The export contains the module signature"), Text.Contains(TEXT("signature:")) && Text.Contains(TEXT("inputs:")) && Text.Contains(TEXT("outputs:")));
+	TestTrue(TEXT("The module export contains nodes"), Text.Contains(TEXT("node N")));
+	TestTrue(TEXT("The module export contains at least one connection"), Text.Contains(TEXT("connections: count=")));
 	TestFalse(TEXT("Function export rejects a Module Script"), FUE2CodeNiagaraExporter::ExportNiagaraFunctionScriptToString(ModuleScript, Options, Text, Error));
 	TestTrue(TEXT("Function rejection identifies the usage mismatch"), Error.Contains(TEXT("not a Niagara Function Script")));
 	TestFalse(TEXT("Module export rejects a Function Script"), FUE2CodeNiagaraExporter::ExportNiagaraModuleScriptToString(FunctionScript, Options, Text, Error));
@@ -799,14 +1108,30 @@ bool FUE2CodeNiagaraScriptExportTest::RunTest(const FString& Parameters)
 	IgnoredDefaultPin->PinFriendlyName = FText::FromString(TEXT("Display Name"));
 	IgnoredDefaultPin->DefaultValue = TEXT("MustNotBeExported");
 	IgnoredDefaultPin->bDefaultValueIsIgnored = true;
-	TMap<const UEdGraphNode*, FString> SemanticTestNodeIds;
-	SemanticTestNodeIds.Add(SemanticTestNode, TEXT("N001"));
+	IgnoredDefaultPin->PinType.ContainerType = EPinContainerType::Array;
+	IgnoredDefaultPin->PinType.bIsReference = true;
+	IgnoredDefaultPin->PinType.bIsConst = true;
+	UE2CodeNiagaraExporterPrivate::FGraphExportData SemanticTestData;
+	SemanticTestData.Nodes.Add(SemanticTestNode);
+	SemanticTestData.NodeIds.Add(SemanticTestNode, TEXT("N001"));
+	SemanticTestData.PinIds.Add(IgnoredDefaultPin, TEXT("P001"));
 	FString SemanticTestText;
-	UE2CodeNiagaraExporterPrivate::AppendNode(SemanticTestNode, SemanticTestNodeIds, SemanticTestText, Options);
-	TestTrue(TEXT("Disabled-node semantics are recorded"), SemanticTestText.Contains(TEXT("enabled_state: Disabled")));
-	TestTrue(TEXT("Internal and display pin names stay distinct"), SemanticTestText.Contains(TEXT("name=\"InternalName\"")) && SemanticTestText.Contains(TEXT("display_name=\"Display Name\"")));
+	UE2CodeNiagaraExporterPrivate::FNiagaraExportContext SemanticTestContext(Options, nullptr);
+	UE2CodeNiagaraExporterPrivate::AppendNode(SemanticTestNode, SemanticTestData, SemanticTestText, 1, SemanticTestContext);
+	TestTrue(TEXT("Disabled-node semantics are recorded"), SemanticTestText.Contains(TEXT("state: Disabled")));
+	TestTrue(TEXT("Internal and display pin names stay distinct"), SemanticTestText.Contains(TEXT("\"InternalName\"")) && SemanticTestText.Contains(TEXT("display_name=\"Display Name\"")));
 	TestTrue(TEXT("Ignored defaults are marked"), SemanticTestText.Contains(TEXT("default_ignored=true")));
 	TestFalse(TEXT("Ignored defaults are not exported as values"), SemanticTestText.Contains(TEXT("MustNotBeExported")));
+	TestTrue(TEXT("Pin container/reference/const semantics are retained"), SemanticTestText.Contains(TEXT("container=array ref=true const=true")));
+	TestFalse(TEXT("Default output omits Niagara node positions"), SemanticTestText.Contains(TEXT("debug: position=")));
+
+	Options.bIncludeDebugMetadata = true;
+	SemanticTestText.Reset();
+	UE2CodeNiagaraExporterPrivate::FNiagaraExportContext DebugSemanticTestContext(Options, nullptr);
+	UE2CodeNiagaraExporterPrivate::AppendNode(SemanticTestNode, SemanticTestData, SemanticTestText, 1, DebugSemanticTestContext);
+	TestTrue(TEXT("Debug output retains Niagara node positions"), SemanticTestText.Contains(TEXT("debug: position=")));
+	TestTrue(TEXT("Debug output retains original Niagara pin GUIDs"), SemanticTestText.Contains(TEXT(" guid=")));
+	Options.bIncludeDebugMetadata = false;
 
 	UNiagaraScript* DynamicInputScript = NewObject<UNiagaraScript>();
 	DynamicInputScript->SetUsage(ENiagaraScriptUsage::DynamicInput);
