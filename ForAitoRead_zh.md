@@ -1,164 +1,176 @@
-# For AI to Read: UE Node2Code 导出文本规范
+# For AI to Read：UE Node2Code 导出文本规范
 
-这份文档给 AI 使用。阅读 `UE_Node2Code` 导出的 `.ue2code.txt` 时，请遵守以下规则。
+这份文档给读取 `.ue2code.txt` 的 AI 使用。目标是从最少文本中还原节点图的有效计算语义。
 
-## 1. 基本原则
-
-- 导出文本是材质图或材质函数图的结构化源码，不是资源路径清单。
-- `ME_MFC` 是 `MaterialExpressionMaterialFunctionCall`，不是基础计算节点。
-- 遇到 `function_ref: FN001`，必须到文末 `function_definitions` 查找实际函数内部图。
-- 同一函数定义只写一次，多次调用只通过 `function_ref` 引用。
-- `function_ref: unavailable` 表示函数没有展开，原因写在同一行；不要假装知道其内部实现。
-- Niagara 导出中的 `called_script` 是外部脚本引用；当前格式不会附带该脚本的内部图。
-
-## 2. 常见结构
+## 1. 格式版本
 
 ```text
-UE_NODE2CODE material_export version=2
-UE_NODE2CODE material_function_export version=2
-UE_NODE2CODE niagara_function_script_export version=1
-UE_NODE2CODE niagara_module_script_export version=1
-aliases:
-  ME=MaterialExpression; MF=MaterialFunction; ME_CM=MaterialExpressionComponentMask
+UE_NODE2CODE material_export version=3
+UE_NODE2CODE material_function_export version=3
+UE_NODE2CODE material_property_export version=3
+UE_NODE2CODE material_node_export version=3
+UE_NODE2CODE niagara_function_script_export version=2
+UE_NODE2CODE niagara_module_script_export version=2
 ```
 
-- `aliases` 是缩写表。后文的 `ME_CM_23` 可理解为 `MaterialExpressionComponentMask_23`。
-- `id` 是短节点 ID。
-- `type` 是短类型名。
-- `role` 说明节点角色：`basic`、`function_call`、`function_input`、`function_output`。
+材质类型可能使用 `type_aliases`，例如 `ME_Mul=MaterialExpressionMultiply`。后续短类型与节点 ID 应按该表理解。
 
-## 3. 连接表
+## 2. 通用层级规则
 
-普通输入格式：
+所有支持的图都使用同一个 `hierarchy_depth`：
 
-```text
-inputs: index name from out mask rgba
-  0 "A" ME_TS_1 0 - -
-  1 "B" ME_C_2 0 1 1110
-```
+- `0`：递归展开被调用图，直到基础节点；仍受安全上限保护。
+- `1`：只输出当前根图。
+- `2`：额外展开根图直接调用的图。
+- `N`：展开到第 N 层。
 
-函数调用输入格式：
+根图始终是第 1 层。材质调用通过 `function_ref=FN...` 指向 `function_definitions`；Niagara 调用通过 `ref=NS...` 指向 `called_graphs`。同一被调用图只定义一次，多处调用复用同一个引用。
 
-```text
-call_inputs: index name from out mask rgba
-  0 "Number" ME_MFC_17 1 - -
-```
+`ref=external reason=depth_limit` 或 `function_ref: unavailable` 表示实现未展开。不要猜测外部实现。`reason=recursive_call` 表示检测到循环引用，应跳到已有定义，不要无限递归。
 
-含义：
+## 3. 材质图
 
-- `index`：当前节点输入引脚索引。
-- `name`：当前节点输入引脚名。
-- `from`：上游节点 ID。
-- `out`：上游输出索引。
-- `mask rgba`：通道选择；`- -` 表示无通道限制。
-
-未连接输入不会输出。
-
-## 4. 根输出
-
-材质导出使用：
+### 阅读入口
 
 ```text
-material_outputs: property from out mask rgba
-```
+material_outputs:
+  - MP_BaseColor <- ME_Mul_18[0]
+  - MP_OpacityMask <- ME_SS_21[0] channels=R
 
-材质函数直接导出使用：
-
-```text
-function_outputs: name from out mask rgba
-```
-
-两者都是阅读入口。先从这些输出开始，沿 `from` 追踪上游节点。
-
-## 5. 输出表
-
-```text
-outputs: index name mask rgba
-  0 "RGB" 1 1110
-  1 "R" 1 1000
-```
-
-单个默认输出通常省略 `outputs`。多输出或具名输出才会列出。
-
-## 6. Material Function
-
-函数调用：
-
-```text
-material_function_call:
-  function_asset: DebugScalarValues
-  function_ref: FN002
-```
-
-函数定义：
-
-```text
-function_definitions:
-  function_definition_begin id=FN002 asset="DebugScalarValues"
-    internal_nodes:
-      node_begin ...
-      node_end
-  function_definition_end
-```
-
-阅读步骤：
-
-1. 先读调用点的 `call_inputs`。
-2. 再跳到对应 `function_definition`。
-3. 在函数内部根据 `ME_FI` 的 `InputName` 和 `ME_FO` 的 `OutputName` 理解输入输出。
-4. 如果函数内部还有 `ME_MFC`，继续按 `function_ref` 递归阅读。
-
-`call_output_bindings` 已省略。输出名从调用节点 `outputs` 和函数定义中的 `ME_FO` 推断。
-
-## 7. 属性
-
-```text
-properties:
-  - Texture = T_IceDecal_normal
-  - SamplerType = SAMPLERTYPE_Normal
-```
-
-- 资源路径默认压缩为短名。短名是语义提示，不是可读取路径。
-- 没有非默认属性时，不输出 `properties`。
-- 默认值、空值、编辑器 UI 状态、GUID、完整对象路径通常被省略。
-
-## 8. Reroute 与位置
-
-- Reroute 透传节点默认不输出。`A -> Reroute -> B` 会写成 `A -> B`。
-- `layout_hint` 只表示粗略布局，不是执行顺序。
-- 引擎内置函数内部节点通常不输出位置信息。
-
-## 9. Niagara Script
-
-Niagara Function 与 Module Script 导出使用通用节点与引脚结构。Function 签名使用 `function_inputs` / `function_outputs`，Module 签名使用 `module_inputs` / `module_outputs`：
-
-```text
-function_inputs:
-  - name="Probability" type=Float required=false default="0.5"
 function_outputs:
-  - name="Result" type=Bool
-nodes:
-  node_begin id=N001 type=Input
-    pins:
-      - out name="Probability" type=Float pin_id=11111111-1111-1111-1111-111111111111
-  node_end
-connections: from_node from_pin from_pin_id to_node to_pin to_pin_id
-  N001 "Probability" 11111111-1111-1111-1111-111111111111 N002 "A" 22222222-2222-2222-2222-222222222222
+  - "Result" <- ME_Add_7[0]
+
+root_connection: <- ME_Mul_18[0]
+root_node: ME_Mul_18
 ```
 
-- `usage` 必须与格式头匹配：`niagara_function_script_export` 对应 `Function`，`niagara_module_script_export` 对应 `Module`。Dynamic Input 会被拒绝。
-- `in` / `out` 是引脚方向，`name` 是内部引脚名，`display_name` 是可选界面文本，`type` 是 Niagara 类型。
-- 每个引脚都有稳定的 `pin_id`；`connections` 是从输出到输入的有向边表，并重复两端 ID，因此显示名重名不会造成歧义。
-- 未连接输入可带 `default`；`default_ignored=true` 表示编译器不会使用序列化默认值。
-- `enabled_state` 具有语义：不能把 `Disabled` 节点解释为正常执行。
-- `called_script`、`called_script_path` 和 `called_usage` 表示 FunctionCall 的目标；UE5 在选择了脚本版本时还会输出 `called_script_version`。其内部实现未递归展开。
-- `properties` 保存非默认的可编辑标量属性，以及 Convert `Connections`、Static Switch 设置和 FunctionCall 传播参数等必要结构数据。Custom HLSL 正文中的换行写成 `\n`。
+`<-` 右侧是上游节点，方括号是上游输出索引。`channels=RGB/A/...` 是通道选择；缺省表示不限制通道。
 
-## 10. 阅读流程
+### 节点
 
-1. 材质导出先确认 `node_hierarchy_depth`；Niagara Function/Module v1 没有该字段。
-2. 从 `material_outputs`、`function_outputs`、`root_connection` 或 `root_node` 开始。
-3. 沿 `inputs` / `call_inputs` 追踪上游。
-4. 遇到 `function_ref` 就跳到 `function_definitions`。
-5. 对 Niagara 图按 `connections` 连接节点；遇到 `called_script` 时把它视为外部实现。
-6. 遇到 `function_ref: unavailable` 时，明确说明该函数未展开。
+```text
+material_nodes: count=2
+  node ME_Mul_18 type=ME_Mul role=basic
+    caption: "Multiply"
+    inputs:
+      - [0] "A" <- ME_TS_2[0]
+      - [1] "B" <- ME_SP_5[0]
+    outputs:
+      - [0] "RGB" channels=RGB
+    properties:
+      - ConstA = 1
+```
+
+- `node <ID>` 开始一个节点；缩进结束即节点结束，不使用冗余结束标记。
+- `role` 为 `basic`、`function_call`、`function_input` 或 `function_output`。
+- 未连接输入不进入 `inputs`。其真正生效的回退常量会进入 `properties`。
+- 输入已经连接时，无效的 `Const*` 回退值会被剔除。
+- 参数默认值与常量字面值始终保留，包括 `0` 和 `false`。
+- 单个无名默认输出通常省略；多输出或具名输出才输出 `outputs`。
+
+### 材质函数
+
+```text
+node ME_MFC_9 type=ME_MFC role=function_call
+  material_function_call:
+    function_asset: MF_Noise
+    function_ref: FN001
+    call_inputs:
+      - [0] "UV" <- ME_TC_1[0]
+
+function_definitions: count=1
+  function FN001 asset="MF_Noise"
+    internal_nodes:
+      node ME_FI_1 type=ME_FI role=function_input
+      node ME_FO_8 type=ME_FO role=function_output
+```
+
+先读调用点 `call_inputs`，再跳到对应 `function`。函数内部的节点 ID 只在该函数块内有效。
+
+### 材质设置与实例覆盖
+
+```text
+material_settings: domain=MD_Surface blend=BLEND_Masked shading=MSM_DefaultLit two_sided=false opacity_mask_clip=0.333
+effective_parameter_overrides:
+  - scalar name="Roughness" value=0.35
+  - texture name="NormalTexture" value=T_Normal
+  - static_switch name="UseDetail" value=true
+```
+
+覆盖值已沿实例继承链合并，子实例优先。不能用基础材质或基础函数的默认值替代。
+
+## 4. Niagara 图
+
+### 根图与签名
+
+```text
+graph:
+  script: "RandomBool"
+  usage: Function
+  hierarchy_depth: 2
+
+root_graph:
+  signature:
+    inputs:
+      - "Probability" : Float default="0.5"
+    outputs:
+      - "Result" : Bool
+```
+
+`usage` 必须与头部一致：Function 或 Module。顶层 Dynamic Input 不是当前导出入口，但被调用的 Dynamic Input 可以作为 `called_graphs` 定义展开。
+
+### 节点、引脚和连线
+
+```text
+  nodes: count=2
+    node N001 type=Input title="Probability"
+      pins:
+        - P001 out "Probability" : Float
+    node N002 type=Op title="Less Than"
+      pins:
+        - P002 in "A" : Float
+  connections: count=1
+    - N001.P001 "Probability" -> N002.P002 "A"
+```
+
+- `N...` 和 `P...` 是当前图内的稳定短 ID；进入另一个 `script NS...` 后重新计数。
+- 箭头始终从输出引脚指向输入引脚。
+- `in` / `out` 是方向，冒号后是 Niagara 类型。
+- `container=array|set|map`、`ref=true`、`const=true` 是有效类型限定。
+- 未连接输入可以带 `default`；`default_ignored=true` 表示该默认值不会被编译器使用。
+- 正常启用状态被省略；只有非默认状态才输出 `state: Disabled/...`。
+
+### 被调用脚本
+
+```text
+node N005 type=FunctionCall title="Safe Divide"
+  call: name="Safe Divide" usage=DynamicInput ref=NS001
+
+called_graphs: count=1
+  script NS001 name="SafeDivide" usage=DynamicInput
+    signature:
+      ...
+    nodes: count=...
+    connections: count=...
+```
+
+遇到 `ref=NS001` 必须读取对应定义。定义已去重。若是 `ref=external reason=depth_limit|safety_limit|unreadable_graph|missing_script`，只报告该调用为外部或不可读实现。
+
+`properties` 保存非默认可编辑属性以及 Convert `Connections`、Static Switch、FunctionCall 传播参数等必要结构信息。Custom HLSL 换行使用 `\n`。
+
+## 5. 默认压缩规则
+
+- 默认仅保留从材质输出可达的节点；未引用材质节点默认剔除。
+- 普通 Reroute 与 Named Reroute 透传节点被内联。
+- 默认剔除时间戳、GUID、完整对象路径、节点坐标、普通类默认值和编辑器 UI 状态。
+- Niagara 原始节点/引脚 GUID、对象路径、位置和版本 GUID 只在 `debug=true` 时输出。
+- 字符串中的引号、反斜杠、换行、制表符分别写为 `\"`、`\\`、`\n`、`\t`。
+
+## 6. 推荐阅读顺序
+
+1. 检查格式头、`hierarchy_depth` 和根图类型。
+2. 从 `material_outputs`、`function_outputs`、`root_connection`、`root_node` 或 Niagara `root_graph` 开始。
+3. 材质沿 `<-` 逆向追踪；Niagara 沿 `->` 正向连接。
+4. 遇到 `FN...` 或 `NS...` 引用时跳到对应去重定义。
+5. 区分生效属性、未连接输入默认值与被剔除的编辑器信息。
+6. 对任何 `unavailable` / `ref=external` 明确保留未知边界，不补造内部逻辑。

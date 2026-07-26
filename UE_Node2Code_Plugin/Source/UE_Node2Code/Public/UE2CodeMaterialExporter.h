@@ -13,16 +13,16 @@ struct UE_NODE2CODE_API FUE2CodeExportOptions
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UE Node2Code")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UE Node2Code", meta = (DisplayName = "Expand Material Functions", ToolTip = "Legacy Material-only switch. NodeHierarchyDepth is the common hierarchy control for all graph types."))
 	bool bExpandMaterialFunctions = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UE Node2Code")
-	bool bExportUnreferencedMaterialExpressions = true;
+	bool bExportUnreferencedMaterialExpressions = false;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UE Node2Code", meta = (ClampMin = "0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UE Node2Code", meta = (ClampMin = "0", DisplayName = "Node Hierarchy Depth", ToolTip = "Applies to every supported graph. 0 recursively expands called graphs, 1 keeps only the root graph, and N expands through hierarchy layer N."))
 	int32 NodeHierarchyDepth = 0;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UE Node2Code", meta = (ClampMin = "1"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UE Node2Code", meta = (ClampMin = "1", DisplayName = "Maximum Hierarchy Depth Safety Limit", ToolTip = "Safety limit used by recursive hierarchy expansion when NodeHierarchyDepth is 0."))
 	int32 MaxFunctionDepth = 32;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UE Node2Code")

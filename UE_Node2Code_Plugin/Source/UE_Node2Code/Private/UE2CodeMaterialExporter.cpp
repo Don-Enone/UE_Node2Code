@@ -1,13 +1,18 @@
 #include "UE2CodeMaterialExporter.h"
 
 #include "UE2CodeEngineCompat.h"
+#include "UE2CodeTextFormat.h"
 
 #include "HAL/FileManager.h"
+#include "Engine/Font.h"
+#include "MaterialShared.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialExpression.h"
 #include "Materials/MaterialExpressionFunctionInput.h"
 #include "Materials/MaterialExpressionFunctionOutput.h"
 #include "Materials/MaterialExpressionMaterialFunctionCall.h"
+#include "Materials/MaterialExpressionReroute.h"
+#include "Materials/MaterialFunctionInstance.h"
 #include "Materials/MaterialFunctionInterface.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/DateTime.h"
@@ -17,6 +22,23 @@
 #include "Misc/Paths.h"
 #include "UObject/Package.h"
 #include "UObject/UnrealType.h"
+#include "VT/RuntimeVirtualTexture.h"
+
+#if ENGINE_MAJOR_VERSION >= 5
+#include "Materials/MaterialExpressionNamedReroute.h"
+#include "Materials/MaterialExpressionRerouteBase.h"
+#endif
+
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
+#include "SparseVolumeTexture/SparseVolumeTexture.h"
+#endif
+
+#if WITH_DEV_AUTOMATION_TESTS
+#include "Materials/MaterialExpressionConstant.h"
+#include "Materials/MaterialExpressionMultiply.h"
+#include "Materials/MaterialExpressionScalarParameter.h"
+#include "Misc/AutomationTest.h"
+#endif
 
 DEFINE_LOG_CATEGORY_STATIC(LogUE2CodeMaterialExporter, Log, All);
 
@@ -85,16 +107,13 @@ namespace UE2CodeMaterialExporterPrivate
 
 	static FString OneLine(FString Value)
 	{
-		Value.ReplaceInline(TEXT("\r\n"), TEXT("\\n"));
-		Value.ReplaceInline(TEXT("\n"), TEXT("\\n"));
-		Value.ReplaceInline(TEXT("\r"), TEXT("\\n"));
 		Value.TrimStartAndEndInline();
-		return Value;
+		return UE2CodeTextFormat::Escape(MoveTemp(Value));
 	}
 
 	static FString Quote(const FString& Value)
 	{
-		return FString::Printf(TEXT("\"%s\""), *Value);
+		return UE2CodeTextFormat::Quote(Value);
 	}
 
 	static bool IsNoneName(const FString& Value)
@@ -186,9 +205,14 @@ namespace UE2CodeMaterialExporterPrivate
 		return Guid.ToString(EGuidFormats::DigitsWithHyphens);
 	}
 
-	static FString MaskBitsToString(int32 R, int32 G, int32 B, int32 A)
+	static FString MaskChannelsToString(int32 R, int32 G, int32 B, int32 A)
 	{
-		return FString::Printf(TEXT("%d%d%d%d"), R, G, B, A);
+		FString Channels;
+		if (R) { Channels += TEXT("R"); }
+		if (G) { Channels += TEXT("G"); }
+		if (B) { Channels += TEXT("B"); }
+		if (A) { Channels += TEXT("A"); }
+		return Channels.IsEmpty() ? TEXT("-") : Channels;
 	}
 
 	static bool HasMaskData(const FExpressionInput& Input)
@@ -211,27 +235,37 @@ namespace UE2CodeMaterialExporterPrivate
 
 	static bool IsRerouteExpression(const UMaterialExpression* Expression)
 	{
-		return Expression && Expression->GetClass()->GetName().Contains(TEXT("Reroute"));
+	#if ENGINE_MAJOR_VERSION >= 5
+		return Expression && Expression->IsA<UMaterialExpressionRerouteBase>();
+	#else
+		return Expression && Expression->IsA<UMaterialExpressionReroute>();
+	#endif
 	}
 
-	static FExpressionInput* GetReroutePassthroughInput(const UMaterialExpression* Expression)
+	static bool GetReroutePassthroughInput(const UMaterialExpression* Expression, FExpressionInput& OutInput)
 	{
+		OutInput = FExpressionInput();
 #if WITH_EDITOR
 		if (!IsRerouteExpression(Expression))
 		{
-			return nullptr;
+			return false;
 		}
 
-		const TArray<FExpressionInput*> Inputs = UE2CodeEngineCompat::GetExpressionInputs(const_cast<UMaterialExpression*>(Expression));
-		for (FExpressionInput* Input : Inputs)
+	#if ENGINE_MAJOR_VERSION >= 5
+		if (const UMaterialExpressionRerouteBase* Reroute = Cast<UMaterialExpressionRerouteBase>(Expression))
 		{
-			if (Input && Input->Expression)
-			{
-				return Input;
-			}
+			OutInput = Reroute->TraceInputsToRealInput();
+			return OutInput.Expression != nullptr;
 		}
+	#else
+		if (const UMaterialExpressionReroute* Reroute = Cast<UMaterialExpressionReroute>(Expression))
+		{
+			OutInput = Reroute->TraceInputsToRealInput();
+			return OutInput.Expression != nullptr;
+		}
+	#endif
 #endif
-		return nullptr;
+		return false;
 	}
 
 	static bool ResolveInputSource(const FExpressionInput& Input, const UMaterialExpression*& OutExpression, int32& OutOutputIndex)
@@ -240,22 +274,24 @@ namespace UE2CodeMaterialExporterPrivate
 		OutOutputIndex = Input.OutputIndex;
 
 		TSet<const UMaterialExpression*> SeenReroutes;
-		while (OutExpression)
+		while (IsRerouteExpression(OutExpression))
 		{
 			if (SeenReroutes.Contains(OutExpression))
 			{
-				break;
-			}
-
-			FExpressionInput* PassthroughInput = GetReroutePassthroughInput(OutExpression);
-			if (!PassthroughInput || !PassthroughInput->Expression)
-			{
-				break;
+				OutExpression = nullptr;
+				return false;
 			}
 
 			SeenReroutes.Add(OutExpression);
-			OutExpression = PassthroughInput->Expression;
-			OutOutputIndex = PassthroughInput->OutputIndex;
+			FExpressionInput PassthroughInput;
+			if (!GetReroutePassthroughInput(OutExpression, PassthroughInput))
+			{
+				OutExpression = nullptr;
+				return false;
+			}
+
+			OutExpression = PassthroughInput.Expression;
+			OutOutputIndex = PassthroughInput.OutputIndex;
 		}
 
 		return OutExpression != nullptr;
@@ -267,12 +303,15 @@ namespace UE2CodeMaterialExporterPrivate
 		int32 SourceOutputIndex = 0;
 		if (!ResolveInputSource(Input, SourceExpression, SourceOutputIndex))
 		{
-			return TEXT("None - - -");
+			return TEXT("<- none");
 		}
 
-		const FString MaskValue = HasMaskData(Input) ? FString::FromInt(Input.Mask) : TEXT("-");
-		const FString RgbaValue = HasMaskData(Input) ? MaskBitsToString(Input.MaskR, Input.MaskG, Input.MaskB, Input.MaskA) : TEXT("-");
-		return FString::Printf(TEXT("%s %d %s %s"), *ExpressionRef(SourceExpression), SourceOutputIndex, *MaskValue, *RgbaValue);
+		FString Result = FString::Printf(TEXT("<- %s[%d]"), *ExpressionRef(SourceExpression), SourceOutputIndex);
+		if (HasMaskData(Input))
+		{
+			Result += TEXT(" channels=") + MaskChannelsToString(Input.MaskR, Input.MaskG, Input.MaskB, Input.MaskA);
+		}
+		return Result;
 	}
 
 	static FString DescribeInput(const FExpressionInput& Input)
@@ -289,10 +328,10 @@ namespace UE2CodeMaterialExporterPrivate
 			return TEXT("unconnected");
 		}
 
-		FString Result = FString::Printf(TEXT("from=%s out=%d"), *ExpressionRef(SourceExpression), SourceOutputIndex);
+		FString Result = FString::Printf(TEXT("<- %s[%d]"), *ExpressionRef(SourceExpression), SourceOutputIndex);
 		if (HasMaskData(Input))
 		{
-			Result += FString::Printf(TEXT(" mask=%d rgba=%s"), Input.Mask, *MaskBitsToString(Input.MaskR, Input.MaskG, Input.MaskB, Input.MaskA));
+			Result += TEXT(" channels=") + MaskChannelsToString(Input.MaskR, Input.MaskG, Input.MaskB, Input.MaskA);
 		}
 		return Result;
 	}
@@ -375,6 +414,81 @@ namespace UE2CodeMaterialExporterPrivate
 			|| StructName.Contains(TEXT("MaterialAttributesInput"));
 	}
 
+	enum class EInputFallbackState : uint8
+	{
+		NotFallback,
+		Active,
+		Inactive
+	};
+
+	static EInputFallbackState GetInputFallbackState(UMaterialExpression* Expression, const FProperty* Property)
+	{
+		if (!Expression || !Property)
+		{
+			return EInputFallbackState::NotFallback;
+		}
+
+		const FString InputPropertyName = Property->GetMetaData(TEXT("OverridingInputProperty"));
+		if (InputPropertyName.IsEmpty())
+		{
+			return EInputFallbackState::NotFallback;
+		}
+
+		const FStructProperty* InputProperty = FindFProperty<FStructProperty>(Expression->GetClass(), FName(*InputPropertyName));
+		if (!InputProperty || !IsConnectionStructProperty(InputProperty))
+		{
+			return EInputFallbackState::NotFallback;
+		}
+
+		const FExpressionInput* Input = InputProperty->ContainerPtrToValuePtr<FExpressionInput>(Expression);
+		if (!Input || Input->Expression)
+		{
+			return EInputFallbackState::Inactive;
+		}
+
+		if (Property->GetFName() == FName(TEXT("PreviewValue")))
+		{
+			if (const UMaterialExpressionFunctionInput* FunctionInput = Cast<UMaterialExpressionFunctionInput>(Expression))
+			{
+				return FunctionInput->bUsePreviewValueAsDefault
+					? EInputFallbackState::Active
+					: EInputFallbackState::Inactive;
+			}
+		}
+
+		return EInputFallbackState::Active;
+	}
+
+	static bool IsSemanticallyRequiredValueProperty(const UMaterialExpression* Expression, const FProperty* Property)
+	{
+		if (!Expression || !Property)
+		{
+			return false;
+		}
+
+		const FString PropertyName = Property->GetName();
+		if (PropertyName.StartsWith(TEXT("Default")))
+		{
+			return true;
+		}
+
+		const FString ClassName = Expression->GetClass()->GetName();
+		if (ClassName == TEXT("MaterialExpressionStaticBool") && PropertyName == TEXT("Value"))
+		{
+			return true;
+		}
+
+		const bool bLiteralConstant = ClassName == TEXT("MaterialExpressionConstant")
+			|| ClassName == TEXT("MaterialExpressionConstant2Vector")
+			|| ClassName == TEXT("MaterialExpressionConstant3Vector")
+			|| ClassName == TEXT("MaterialExpressionConstant4Vector");
+		return bLiteralConstant
+			&& (PropertyName == TEXT("R")
+				|| PropertyName == TEXT("G")
+				|| PropertyName == TEXT("B")
+				|| PropertyName == TEXT("A"));
+	}
+
 	static bool IsPrintableProperty(const FProperty* Property)
 	{
 		if (!Property || Property->HasAnyPropertyFlags(CPF_Deprecated))
@@ -390,6 +504,14 @@ namespace UE2CodeMaterialExporterPrivate
 		if (CastField<FArrayProperty>(Property) || CastField<FMapProperty>(Property) || CastField<FSetProperty>(Property))
 		{
 			return false;
+		}
+
+		if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
+		{
+			if (StructProperty->Struct && StructProperty->Struct->GetFName() == FName(TEXT("Guid")))
+			{
+				return false;
+			}
 		}
 
 		return CastField<FBoolProperty>(Property)
@@ -464,6 +586,14 @@ namespace UE2CodeMaterialExporterPrivate
 			OutValue = ShortObjectName(ObjectProperty->GetObjectPropertyValue(ValuePtr));
 			return !OutValue.IsEmpty();
 		}
+		if (const FNumericProperty* NumericProperty = CastField<FNumericProperty>(Property))
+		{
+			if (NumericProperty->IsFloatingPoint())
+			{
+				OutValue = FString::SanitizeFloat(NumericProperty->GetFloatingPointPropertyValue(ValuePtr));
+				return true;
+			}
+		}
 
 		UE2CodeEngineCompat::ExportPropertyText(Property, OutValue, ValuePtr, nullptr);
 		OutValue = OneLine(OutValue);
@@ -530,6 +660,294 @@ namespace UE2CodeMaterialExporterPrivate
 		return MaterialInterface->GetMaterial();
 	}
 
+	static FString ParameterFields(const FMaterialParameterInfo& ParameterInfo)
+	{
+		FString Result = TEXT("name=") + Quote(ParameterInfo.Name.ToString());
+		if (ParameterInfo.Association == EMaterialParameterAssociation::LayerParameter)
+		{
+			Result += FString::Printf(TEXT(" scope=layer index=%d"), ParameterInfo.Index);
+		}
+		else if (ParameterInfo.Association == EMaterialParameterAssociation::BlendParameter)
+		{
+			Result += FString::Printf(TEXT(" scope=blend index=%d"), ParameterInfo.Index);
+		}
+		return Result;
+	}
+
+	static FString CompactLinearColor(const FLinearColor& Value)
+	{
+		return FString::Printf(
+			TEXT("(%s,%s,%s,%s)"),
+			*FString::SanitizeFloat(Value.R),
+			*FString::SanitizeFloat(Value.G),
+			*FString::SanitizeFloat(Value.B),
+			*FString::SanitizeFloat(Value.A)
+		);
+	}
+
+	static FString CompactShadingModels(const FMaterialShadingModelField& ShadingModels)
+	{
+		const UEnum* ShadingModelEnum = StaticEnum<EMaterialShadingModel>();
+		FString Result;
+		for (int32 Index = 0; Index < MSM_NUM; ++Index)
+		{
+			const EMaterialShadingModel ShadingModel = static_cast<EMaterialShadingModel>(Index);
+			if (!ShadingModels.HasShadingModel(ShadingModel))
+			{
+				continue;
+			}
+
+			if (!Result.IsEmpty())
+			{
+				Result += TEXT("|");
+			}
+			Result += ShadingModelEnum
+				? ShadingModelEnum->GetNameStringByValue(Index)
+				: FString::FromInt(Index);
+		}
+		return Result.IsEmpty() ? TEXT("None") : Result;
+	}
+
+	static void AppendMaterialSettings(UMaterialInterface* Material, UMaterial* BaseMaterial, FString& OutText)
+	{
+		if (!Material || !BaseMaterial)
+		{
+			return;
+		}
+
+		const EBlendMode BlendMode = Material->GetBlendMode();
+		const UEnum* BlendModeEnum = StaticEnum<EBlendMode>();
+		FString Line = FString::Printf(
+			TEXT("material_settings: domain=%s blend=%s shading=%s two_sided=%s"),
+			*MaterialDomainString(BaseMaterial->MaterialDomain),
+			BlendModeEnum ? *BlendModeEnum->GetNameStringByValue(static_cast<int64>(BlendMode)) : TEXT("Unknown"),
+			*CompactShadingModels(Material->GetShadingModels()),
+			Material->IsTwoSided() ? TEXT("true") : TEXT("false")
+		);
+		if (BlendMode == BLEND_Masked)
+		{
+			Line += TEXT(" opacity_mask_clip=") + FString::SanitizeFloat(Material->GetOpacityMaskClipValue());
+		}
+		if (Material->IsDitheredLODTransition())
+		{
+			Line += TEXT(" dithered_lod_transition=true");
+		}
+		AppendLine(OutText, 0, Line);
+	}
+
+	static void AddOverrideLine(
+		TMap<FString, FString>& LinesByKey,
+		const TCHAR* Type,
+		const FMaterialParameterInfo& ParameterInfo,
+		const FString& Value)
+	{
+		const FString Key = FString(Type)
+			+ TEXT("|") + FString::FromInt(static_cast<int32>(ParameterInfo.Association.GetValue()))
+			+ TEXT("|") + FString::FromInt(ParameterInfo.Index)
+			+ TEXT("|") + ParameterInfo.Name.ToString();
+		LinesByKey.Add(
+			Key,
+			FString::Printf(TEXT("- %s %s value=%s"), Type, *ParameterFields(ParameterInfo), *Value)
+		);
+	}
+
+	static void AppendOverrideLines(const TMap<FString, FString>& LinesByKey, FString& OutText, int32 Depth)
+	{
+		if (LinesByKey.Num() == 0)
+		{
+			return;
+		}
+
+		TArray<FString> Keys;
+		LinesByKey.GetKeys(Keys);
+		Keys.Sort();
+		AppendLine(OutText, Depth, TEXT("effective_parameter_overrides:"));
+		for (const FString& Key : Keys)
+		{
+			AppendLine(OutText, Depth + 1, LinesByKey.FindChecked(Key));
+		}
+	}
+
+	static void AppendMaterialInstanceOverrides(UMaterialInterface* Material, UMaterial* BaseMaterial, FString& OutText)
+	{
+		if (!Material || !BaseMaterial || Material == BaseMaterial)
+		{
+			return;
+		}
+
+		TMap<FString, FString> LinesByKey;
+		TArray<FMaterialParameterInfo> ParameterInfos;
+		TArray<FGuid> ParameterIds;
+
+		Material->GetAllScalarParameterInfo(ParameterInfos, ParameterIds);
+		for (const FMaterialParameterInfo& ParameterInfo : ParameterInfos)
+		{
+			float Value = 0.0f;
+			if (Material->GetScalarParameterValue(FHashedMaterialParameterInfo(ParameterInfo), Value, true))
+			{
+				AddOverrideLine(LinesByKey, TEXT("scalar"), ParameterInfo, FString::SanitizeFloat(Value));
+			}
+		}
+
+		ParameterInfos.Reset();
+		ParameterIds.Reset();
+		Material->GetAllVectorParameterInfo(ParameterInfos, ParameterIds);
+		for (const FMaterialParameterInfo& ParameterInfo : ParameterInfos)
+		{
+			FLinearColor Value = FLinearColor::Black;
+			if (Material->GetVectorParameterValue(FHashedMaterialParameterInfo(ParameterInfo), Value, true))
+			{
+				AddOverrideLine(LinesByKey, TEXT("vector"), ParameterInfo, CompactLinearColor(Value));
+			}
+		}
+
+		ParameterInfos.Reset();
+		ParameterIds.Reset();
+		Material->GetAllTextureParameterInfo(ParameterInfos, ParameterIds);
+		for (const FMaterialParameterInfo& ParameterInfo : ParameterInfos)
+		{
+			UTexture* Value = nullptr;
+			if (Material->GetTextureParameterValue(FHashedMaterialParameterInfo(ParameterInfo), Value, true))
+			{
+				AddOverrideLine(LinesByKey, TEXT("texture"), ParameterInfo, ShortObjectName(Value));
+			}
+		}
+
+		ParameterInfos.Reset();
+		ParameterIds.Reset();
+		Material->GetAllRuntimeVirtualTextureParameterInfo(ParameterInfos, ParameterIds);
+		for (const FMaterialParameterInfo& ParameterInfo : ParameterInfos)
+		{
+			URuntimeVirtualTexture* Value = nullptr;
+			if (Material->GetRuntimeVirtualTextureParameterValue(FHashedMaterialParameterInfo(ParameterInfo), Value, true))
+			{
+				AddOverrideLine(LinesByKey, TEXT("runtime_virtual_texture"), ParameterInfo, ShortObjectName(Value));
+			}
+		}
+
+	#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
+		ParameterInfos.Reset();
+		ParameterIds.Reset();
+		Material->GetAllSparseVolumeTextureParameterInfo(ParameterInfos, ParameterIds);
+		for (const FMaterialParameterInfo& ParameterInfo : ParameterInfos)
+		{
+			USparseVolumeTexture* Value = nullptr;
+			if (Material->GetSparseVolumeTextureParameterValue(FHashedMaterialParameterInfo(ParameterInfo), Value, true))
+			{
+				AddOverrideLine(LinesByKey, TEXT("sparse_volume_texture"), ParameterInfo, ShortObjectName(Value));
+			}
+		}
+	#endif
+
+		ParameterInfos.Reset();
+		ParameterIds.Reset();
+		Material->GetAllFontParameterInfo(ParameterInfos, ParameterIds);
+		for (const FMaterialParameterInfo& ParameterInfo : ParameterInfos)
+		{
+			UFont* Font = nullptr;
+			int32 Page = 0;
+			if (Material->GetFontParameterValue(FHashedMaterialParameterInfo(ParameterInfo), Font, Page, true))
+			{
+				AddOverrideLine(
+					LinesByKey,
+					TEXT("font"),
+					ParameterInfo,
+					FString::Printf(TEXT("%s page=%d"), *ShortObjectName(Font), Page)
+				);
+			}
+		}
+
+	#if WITH_EDITORONLY_DATA
+		ParameterInfos.Reset();
+		ParameterIds.Reset();
+		Material->GetAllStaticSwitchParameterInfo(ParameterInfos, ParameterIds);
+		for (const FMaterialParameterInfo& ParameterInfo : ParameterInfos)
+		{
+			bool bValue = false;
+			FGuid ExpressionGuid;
+			if (Material->GetStaticSwitchParameterValue(FHashedMaterialParameterInfo(ParameterInfo), bValue, ExpressionGuid, true))
+			{
+				AddOverrideLine(LinesByKey, TEXT("static_switch"), ParameterInfo, bValue ? TEXT("true") : TEXT("false"));
+			}
+		}
+	#endif
+
+		AppendOverrideLines(LinesByKey, OutText, 0);
+	}
+
+	static void AppendMaterialFunctionInstanceOverrides(
+		UMaterialFunctionInterface* MaterialFunction,
+		FString& OutText,
+		int32 Depth,
+		bool bAppendTrailingBlank)
+	{
+		const UMaterialFunctionInstance* FunctionInstance = Cast<UMaterialFunctionInstance>(MaterialFunction);
+		if (!FunctionInstance)
+		{
+			return;
+		}
+
+		TArray<const UMaterialFunctionInstance*> InstanceChain;
+		for (const UMaterialFunctionInstance* Current = FunctionInstance; Current; Current = Cast<UMaterialFunctionInstance>(Current->Parent))
+		{
+			InstanceChain.Add(Current);
+		}
+
+		TMap<FString, FString> LinesByKey;
+		for (int32 ChainIndex = InstanceChain.Num() - 1; ChainIndex >= 0; --ChainIndex)
+		{
+			const UMaterialFunctionInstance* Current = InstanceChain[ChainIndex];
+			for (const FScalarParameterValue& Parameter : Current->ScalarParameterValues)
+			{
+				AddOverrideLine(LinesByKey, TEXT("scalar"), Parameter.ParameterInfo, FString::SanitizeFloat(Parameter.ParameterValue));
+			}
+			for (const FVectorParameterValue& Parameter : Current->VectorParameterValues)
+			{
+				AddOverrideLine(LinesByKey, TEXT("vector"), Parameter.ParameterInfo, CompactLinearColor(Parameter.ParameterValue));
+			}
+			for (const FTextureParameterValue& Parameter : Current->TextureParameterValues)
+			{
+				UTexture* Value = Parameter.ParameterValue;
+				AddOverrideLine(LinesByKey, TEXT("texture"), Parameter.ParameterInfo, ShortObjectName(Value));
+			}
+			for (const FRuntimeVirtualTextureParameterValue& Parameter : Current->RuntimeVirtualTextureParameterValues)
+			{
+				URuntimeVirtualTexture* Value = Parameter.ParameterValue;
+				AddOverrideLine(LinesByKey, TEXT("runtime_virtual_texture"), Parameter.ParameterInfo, ShortObjectName(Value));
+			}
+		#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
+			for (const FSparseVolumeTextureParameterValue& Parameter : Current->SparseVolumeTextureParameterValues)
+			{
+				USparseVolumeTexture* Value = Parameter.ParameterValue;
+				AddOverrideLine(LinesByKey, TEXT("sparse_volume_texture"), Parameter.ParameterInfo, ShortObjectName(Value));
+			}
+		#endif
+			for (const FFontParameterValue& Parameter : Current->FontParameterValues)
+			{
+				UFont* Font = Parameter.FontValue;
+				AddOverrideLine(
+					LinesByKey,
+					TEXT("font"),
+					Parameter.ParameterInfo,
+					FString::Printf(TEXT("%s page=%d"), *ShortObjectName(Font), Parameter.FontPage)
+				);
+			}
+			for (const FStaticSwitchParameter& Parameter : Current->StaticSwitchParameterValues)
+			{
+				if (Parameter.bOverride)
+				{
+					AddOverrideLine(LinesByKey, TEXT("static_switch"), Parameter.ParameterInfo, Parameter.Value ? TEXT("true") : TEXT("false"));
+				}
+			}
+		}
+
+		AppendOverrideLines(LinesByKey, OutText, Depth);
+		if (bAppendTrailingBlank && LinesByKey.Num() > 0)
+		{
+			AppendLine(OutText, Depth, TEXT(""));
+		}
+	}
+
 	static FString NormalizePropertyToken(FString Token)
 	{
 		Token.TrimStartAndEndInline();
@@ -546,15 +964,13 @@ namespace UE2CodeMaterialExporterPrivate
 	{
 		Expressions.Sort([](const UMaterialExpression& A, const UMaterialExpression& B)
 		{
-			if (A.MaterialExpressionEditorX == B.MaterialExpressionEditorX)
+			const FString AType = A.GetClass()->GetName();
+			const FString BType = B.GetClass()->GetName();
+			if (AType == BType)
 			{
-				if (A.MaterialExpressionEditorY == B.MaterialExpressionEditorY)
-				{
-					return A.GetName() < B.GetName();
-				}
-				return A.MaterialExpressionEditorY < B.MaterialExpressionEditorY;
+				return A.GetName() < B.GetName();
 			}
-			return A.MaterialExpressionEditorX < B.MaterialExpressionEditorX;
+			return AType < BType;
 		});
 	}
 
@@ -583,7 +999,7 @@ namespace UE2CodeMaterialExporterPrivate
 
 	static void AddUniqueExpression(UMaterialExpression* Expression, TArray<UMaterialExpression*>& Expressions, TSet<UMaterialExpression*>& Seen)
 	{
-		if (Expression && IsRerouteExpression(Expression) && GetReroutePassthroughInput(Expression))
+		if (Expression && IsRerouteExpression(Expression))
 		{
 			Seen.Add(Expression);
 			return;
@@ -606,9 +1022,10 @@ namespace UE2CodeMaterialExporterPrivate
 		if (Expression && IsRerouteExpression(Expression))
 		{
 			Seen.Add(Expression);
-			if (FExpressionInput* PassthroughInput = GetReroutePassthroughInput(Expression))
+			FExpressionInput PassthroughInput;
+			if (GetReroutePassthroughInput(Expression, PassthroughInput))
 			{
-				CollectUpstreamExpressions(PassthroughInput->Expression, Expressions, Seen);
+				CollectUpstreamExpressions(PassthroughInput.Expression, Expressions, Seen);
 			}
 			return;
 		}
@@ -632,7 +1049,7 @@ namespace UE2CodeMaterialExporterPrivate
 	{
 		Expressions.RemoveAll([](UMaterialExpression* Expression)
 		{
-			return Expression && IsRerouteExpression(Expression) && GetReroutePassthroughInput(Expression);
+			return Expression && IsRerouteExpression(Expression);
 		});
 	}
 
@@ -689,7 +1106,7 @@ namespace UE2CodeMaterialExporterPrivate
 
 	static void CacheApproximateLayoutHints(const TArray<UMaterialExpression*>& Expressions, const UMaterialFunctionInterface* OwningFunction, FExportContext& Context)
 	{
-		if (!ShouldRecordApproximateLayout(OwningFunction))
+		if (!Context.Options.bIncludeDebugMetadata || !ShouldRecordApproximateLayout(OwningFunction))
 		{
 			for (UMaterialExpression* Expression : Expressions)
 			{
@@ -798,8 +1215,8 @@ namespace UE2CodeMaterialExporterPrivate
 			return true;
 		}
 
-		const int32 MaxDepth = FMath::Max(1, Context.Options.MaxFunctionDepth);
-		if (Context.FunctionStack.Num() >= MaxDepth)
+		if (Context.Options.NodeHierarchyDepth == 0
+			&& Context.FunctionStack.Num() >= FMath::Max(1, Context.Options.MaxFunctionDepth))
 		{
 			OutReason = FString::Printf(TEXT("MaxFunctionDepth=%d was reached"), Context.Options.MaxFunctionDepth);
 			return false;
@@ -819,6 +1236,7 @@ namespace UE2CodeMaterialExporterPrivate
 		{
 			return true;
 		}
+		SortExpressions(FunctionExpressions);
 
 		Context.FunctionStack.Add(Function);
 		for (UMaterialExpression* Expression : FunctionExpressions)
@@ -843,6 +1261,7 @@ namespace UE2CodeMaterialExporterPrivate
 		{
 			AppendLine(OutText, Depth + 1, FString::Printf(TEXT("expanded_base_function_asset: %s"), *ObjectRef(FunctionForExpansion)));
 		}
+		AppendMaterialFunctionInstanceOverrides(FunctionCall->MaterialFunction, OutText, Depth + 1, false);
 
 		FString RegisterReason;
 		if (RegisterFunctionDefinition(FunctionForExpansion, Context, RegisterReason))
@@ -876,7 +1295,7 @@ namespace UE2CodeMaterialExporterPrivate
 			}
 
 			const FString InputName = InputExpression ? InputExpression->InputName.ToString() : FunctionCall->GetInputName(InputIndex).ToString();
-			FString BindingLine = FString::Printf(TEXT("%d %s %s"), InputIndex, *MaybeQuotedName(InputName), *CompactConnectionFields(FunctionInput.Input));
+			FString BindingLine = FString::Printf(TEXT("- [%d] %s %s"), InputIndex, *MaybeQuotedName(InputName), *CompactConnectionFields(FunctionInput.Input));
 			if (Context.Options.bIncludeDebugMetadata)
 			{
 				BindingLine += FString::Printf(TEXT(" input_id=%s"), *GuidToString(FunctionInput.ExpressionInputId));
@@ -886,7 +1305,7 @@ namespace UE2CodeMaterialExporterPrivate
 		}
 		if (ConnectedCallInputCount > 0)
 		{
-			AppendLine(OutText, Depth + 1, TEXT("call_inputs: index name from out mask rgba"));
+			AppendLine(OutText, Depth + 1, TEXT("call_inputs:"));
 			OutText += CallInputText;
 		}
 #endif
@@ -900,7 +1319,7 @@ namespace UE2CodeMaterialExporterPrivate
 		}
 
 		const FString FunctionId = GetFunctionDefinitionId(Function, Context);
-		AppendLine(OutText, Depth, FString::Printf(TEXT("function_definition_begin id=%s asset=\"%s\""), *FunctionId, *ObjectRef(Function)));
+		AppendLine(OutText, Depth, FString::Printf(TEXT("function %s asset=\"%s\""), *FunctionId, *ObjectRef(Function)));
 
 		const FString Description = UE2CodeEngineCompat::GetFunctionDescription(Function);
 		if (!Description.IsEmpty())
@@ -912,7 +1331,6 @@ namespace UE2CodeMaterialExporterPrivate
 		if (!UE2CodeEngineCompat::GetFunctionExpressions(Function, InternalExpressions))
 		{
 			AppendLine(OutText, Depth + 1, TEXT("internal_nodes: unavailable"));
-			AppendLine(OutText, Depth, TEXT("function_definition_end"));
 			return;
 		}
 
@@ -929,7 +1347,6 @@ namespace UE2CodeMaterialExporterPrivate
 		}
 		UE2CodeEngineCompat::PopNoShrink(Context.FunctionStack);
 
-		AppendLine(OutText, Depth, TEXT("function_definition_end"));
 	}
 
 	static void AppendFunctionDefinitions(FString& OutText, int32 Depth, FExportContext& Context)
@@ -940,14 +1357,13 @@ namespace UE2CodeMaterialExporterPrivate
 		}
 
 		AppendLine(OutText, Depth, TEXT(""));
-		AppendLine(OutText, Depth, FString::Printf(TEXT("function_definition_count: %d"), Context.FunctionOrder.Num()));
 		if (Context.FunctionOrder.Num() == 0)
 		{
 			AppendLine(OutText, Depth, TEXT("function_definitions: none"));
 			return;
 		}
 
-		AppendLine(OutText, Depth, TEXT("function_definitions:"));
+		AppendLine(OutText, Depth, FString::Printf(TEXT("function_definitions: count=%d"), Context.FunctionOrder.Num()));
 		for (int32 FunctionIndex = 0; FunctionIndex < Context.FunctionOrder.Num(); ++FunctionIndex)
 		{
 			AppendFunctionDefinition(Context.FunctionOrder[FunctionIndex], OutText, Depth + 1, Context);
@@ -988,13 +1404,22 @@ namespace UE2CodeMaterialExporterPrivate
 				continue;
 			}
 
+			const EInputFallbackState FallbackState = GetInputFallbackState(Expression, Property);
+			if (FallbackState == EInputFallbackState::Inactive)
+			{
+				continue;
+			}
+
 			FString ValueText;
 			if (!ExportPropertyValue(Property, Expression, ValueText))
 			{
 				continue;
 			}
 
-			if (!Context.Options.bIncludeDefaultLikeProperties && IsDefaultLikePropertyValue(Property, Expression, ValueText))
+			if (!Context.Options.bIncludeDefaultLikeProperties
+				&& FallbackState != EInputFallbackState::Active
+				&& !IsSemanticallyRequiredValueProperty(Expression, Property)
+				&& IsDefaultLikePropertyValue(Property, Expression, ValueText))
 			{
 				continue;
 			}
@@ -1030,16 +1455,19 @@ namespace UE2CodeMaterialExporterPrivate
 			return;
 		}
 
-		AppendLine(OutText, Depth, TEXT("outputs: index name mask rgba"));
+		AppendLine(OutText, Depth, TEXT("outputs:"));
 		for (int32 OutputIndex = 0; OutputIndex < Outputs.Num(); ++OutputIndex)
 		{
 			const FExpressionOutput& Output = Outputs[OutputIndex];
-			const FString MaskValue = HasMaskData(Output) ? FString::FromInt(Output.Mask) : TEXT("-");
-			const FString RgbaValue = HasMaskData(Output) ? MaskBitsToString(Output.MaskR, Output.MaskG, Output.MaskB, Output.MaskA) : TEXT("-");
+			FString Line = FString::Printf(TEXT("- [%d] %s"), OutputIndex, *MaybeQuotedName(Output.OutputName.ToString()));
+			if (HasMaskData(Output))
+			{
+				Line += TEXT(" channels=") + MaskChannelsToString(Output.MaskR, Output.MaskG, Output.MaskB, Output.MaskA);
+			}
 			AppendLine(
 				OutText,
 				Depth + 1,
-				FString::Printf(TEXT("%d %s %s %s"), OutputIndex, *MaybeQuotedName(Output.OutputName.ToString()), *MaskValue, *RgbaValue)
+				Line
 			);
 		}
 #endif
@@ -1060,7 +1488,7 @@ namespace UE2CodeMaterialExporterPrivate
 			OutText,
 			Depth,
 			FString::Printf(
-				TEXT("node_begin id=\"%s\" type=%s role=%s"),
+				TEXT("node %s type=%s role=%s"),
 				*ExpressionRef(Expression),
 				*AliasForFullTerm(Expression->GetClass()->GetName()),
 				bIsMaterialFunctionCall ? TEXT("function_call") : (bIsFunctionInput ? TEXT("function_input") : (bIsFunctionOutput ? TEXT("function_output") : TEXT("basic")))
@@ -1109,14 +1537,14 @@ namespace UE2CodeMaterialExporterPrivate
 					AppendLine(
 						InputText,
 						Depth + 2,
-						FString::Printf(TEXT("%d %s %s"), InputIndex, *MaybeQuotedName(InputName), *CompactConnectionFields(*Input))
+						FString::Printf(TEXT("- [%d] %s %s"), InputIndex, *MaybeQuotedName(InputName), *CompactConnectionFields(*Input))
 					);
 					++ConnectedInputCount;
 				}
 			}
 			if (ConnectedInputCount > 0)
 			{
-				AppendLine(OutText, Depth + 1, TEXT("inputs: index name from out mask rgba"));
+				AppendLine(OutText, Depth + 1, TEXT("inputs:"));
 				OutText += InputText;
 			}
 		}
@@ -1131,12 +1559,11 @@ namespace UE2CodeMaterialExporterPrivate
 
 		AppendInspectableProperties(Expression, OutText, Depth + 1, Context);
 
-		AppendLine(OutText, Depth, TEXT("node_end"));
 	}
 
 	static void AppendMaterialRoots(UMaterial* Material, FString& OutText, int32 Depth)
 	{
-		AppendLine(OutText, Depth, TEXT("material_outputs: property from out mask rgba"));
+		AppendLine(OutText, Depth, TEXT("material_outputs:"));
 		int32 ConnectedCount = 0;
 
 		for (int32 PropertyIndex = 0; PropertyIndex < MP_MAX; ++PropertyIndex)
@@ -1152,7 +1579,7 @@ namespace UE2CodeMaterialExporterPrivate
 				OutText,
 				Depth + 1,
 				FString::Printf(
-					TEXT("%s %s"),
+					TEXT("- %s %s"),
 					*FUE2CodeMaterialExporter::MaterialPropertyToString(MaterialProperty),
 					*CompactConnectionFields(*Input)
 				)
@@ -1168,7 +1595,7 @@ namespace UE2CodeMaterialExporterPrivate
 
 	static void AppendFunctionOutputs(const UMaterialFunctionInterface* Function, FString& OutText, int32 Depth)
 	{
-		AppendLine(OutText, Depth, TEXT("function_outputs: name from out mask rgba"));
+		AppendLine(OutText, Depth, TEXT("function_outputs:"));
 		int32 ConnectedCount = 0;
 
 		TArray<UMaterialExpression*> FunctionExpressions;
@@ -1185,7 +1612,7 @@ namespace UE2CodeMaterialExporterPrivate
 				AppendLine(
 					OutText,
 					Depth + 1,
-					FString::Printf(TEXT("%s %s"), *MaybeQuotedName(FunctionOutput->OutputName.ToString()), *CompactConnectionFields(FunctionOutput->A))
+					FString::Printf(TEXT("- %s %s"), *MaybeQuotedName(FunctionOutput->OutputName.ToString()), *CompactConnectionFields(FunctionOutput->A))
 				);
 				++ConnectedCount;
 			}
@@ -1199,7 +1626,7 @@ namespace UE2CodeMaterialExporterPrivate
 
 	static void AppendAliasTable(FString& OutText)
 	{
-		AppendLine(OutText, 0, TEXT("aliases:"));
+		AppendLine(OutText, 0, TEXT("type_aliases:"));
 
 		int32 AliasCount = 0;
 		const FTermAlias* Aliases = GetTermAliases(AliasCount);
@@ -1230,6 +1657,20 @@ namespace UE2CodeMaterialExporterPrivate
 	static void AppendEngineVersion(FString& OutText)
 	{
 		AppendLine(OutText, 0, FString::Printf(TEXT("engine_version: %s"), *FEngineVersion::Current().ToString()));
+	}
+
+	static void AppendExportOptions(const FUE2CodeExportOptions& Options, FString& OutText, bool bIncludeUnreferencedOption)
+	{
+		AppendLine(OutText, 0, TEXT("options:"));
+		AppendLine(OutText, 1, FString::Printf(TEXT("hierarchy_depth: %d"), Options.NodeHierarchyDepth));
+		AppendLine(OutText, 1, FString::Printf(TEXT("expand_called_graphs: %s"), Options.bExpandMaterialFunctions ? TEXT("true") : TEXT("false")));
+		AppendLine(OutText, 1, FString::Printf(TEXT("max_depth_safety_limit: %d"), Options.MaxFunctionDepth));
+		if (bIncludeUnreferencedOption)
+		{
+			AppendLine(OutText, 1, FString::Printf(TEXT("include_unreferenced_nodes: %s"), Options.bExportUnreferencedMaterialExpressions ? TEXT("true") : TEXT("false")));
+		}
+		AppendLine(OutText, 1, FString::Printf(TEXT("debug: %s"), Options.bIncludeDebugMetadata ? TEXT("true") : TEXT("false")));
+		AppendLine(OutText, 1, FString::Printf(TEXT("default_properties: %s"), Options.bIncludeDefaultLikeProperties ? TEXT("true") : TEXT("false")));
 	}
 
 	static bool SaveTextToFile(const FString& OutputFilePath, const FString& Text, FString& OutError)
@@ -1298,14 +1739,19 @@ bool FUE2CodeMaterialExporter::ExportMaterialToString(UMaterialInterface* Materi
 	}
 
 	OutText.Reset();
-	AppendLine(OutText, 0, TEXT("UE_NODE2CODE material_export version=2"));
+	AppendLine(OutText, 0, TEXT("UE_NODE2CODE material_export version=3"));
 	AppendAliasTable(OutText);
-	AppendLine(OutText, 0, FString::Printf(TEXT("exported_at_local: %s"), *FDateTime::Now().ToString(TEXT("%Y-%m-%d %H:%M:%S"))));
+	if (Options.bIncludeDebugMetadata)
+	{
+		AppendLine(OutText, 0, FString::Printf(TEXT("exported_at_local: %s"), *FDateTime::Now().ToString(TEXT("%Y-%m-%d %H:%M:%S"))));
+	}
 	AppendEngineVersion(OutText);
 	AppendLine(OutText, 0, FString::Printf(TEXT("material_interface: %s"), *ObjectRef(Material)));
 	AppendLine(OutText, 0, FString::Printf(TEXT("base_material: %s"), *ObjectRef(BaseMaterial)));
-	AppendLine(OutText, 0, FString::Printf(TEXT("options: expand_material_functions=%s function_definitions=deduplicated export_unreferenced_material_expressions=%s node_hierarchy_depth=%d max_function_depth=%d include_debug_metadata=%s include_default_like_properties=%s"), Options.bExpandMaterialFunctions ? TEXT("true") : TEXT("false"), Options.bExportUnreferencedMaterialExpressions ? TEXT("true") : TEXT("false"), Options.NodeHierarchyDepth, Options.MaxFunctionDepth, Options.bIncludeDebugMetadata ? TEXT("true") : TEXT("false"), Options.bIncludeDefaultLikeProperties ? TEXT("true") : TEXT("false")));
+	AppendExportOptions(Options, OutText, true);
 	AppendLine(OutText, 0, TEXT(""));
+	AppendMaterialSettings(Material, BaseMaterial, OutText);
+	AppendMaterialInstanceOverrides(Material, BaseMaterial, OutText);
 
 	AppendMaterialRoots(BaseMaterial, OutText, 0);
 	AppendLine(OutText, 0, TEXT(""));
@@ -1335,8 +1781,7 @@ bool FUE2CodeMaterialExporter::ExportMaterialToString(UMaterialInterface* Materi
 	SortExpressions(Expressions);
 	RemovePassthroughReroutes(Expressions);
 
-	AppendLine(OutText, 0, FString::Printf(TEXT("material_node_count: %d"), Expressions.Num()));
-	AppendLine(OutText, 0, TEXT("material_nodes:"));
+	AppendLine(OutText, 0, FString::Printf(TEXT("material_nodes: count=%d"), Expressions.Num()));
 
 	FExportContext Context;
 	Context.Options = Options;
@@ -1404,9 +1849,12 @@ bool FUE2CodeMaterialExporter::ExportMaterialFunctionToString(UMaterialFunctionI
 	SortExpressions(Expressions);
 
 	OutText.Reset();
-	AppendLine(OutText, 0, TEXT("UE_NODE2CODE material_function_export version=2"));
+	AppendLine(OutText, 0, TEXT("UE_NODE2CODE material_function_export version=3"));
 	AppendAliasTable(OutText);
-	AppendLine(OutText, 0, FString::Printf(TEXT("exported_at_local: %s"), *FDateTime::Now().ToString(TEXT("%Y-%m-%d %H:%M:%S"))));
+	if (Options.bIncludeDebugMetadata)
+	{
+		AppendLine(OutText, 0, FString::Printf(TEXT("exported_at_local: %s"), *FDateTime::Now().ToString(TEXT("%Y-%m-%d %H:%M:%S"))));
+	}
 	AppendEngineVersion(OutText);
 	AppendLine(OutText, 0, FString::Printf(TEXT("material_function: %s"), *ObjectRef(MaterialFunction)));
 	if (FunctionForExport != MaterialFunction)
@@ -1418,14 +1866,14 @@ bool FUE2CodeMaterialExporter::ExportMaterialFunctionToString(UMaterialFunctionI
 	{
 		AppendLine(OutText, 0, FString::Printf(TEXT("description: \"%s\""), *OneLine(Description)));
 	}
-	AppendLine(OutText, 0, FString::Printf(TEXT("options: expand_material_functions=%s function_definitions=deduplicated node_hierarchy_depth=%d max_function_depth=%d include_debug_metadata=%s include_default_like_properties=%s"), Options.bExpandMaterialFunctions ? TEXT("true") : TEXT("false"), Options.NodeHierarchyDepth, Options.MaxFunctionDepth, Options.bIncludeDebugMetadata ? TEXT("true") : TEXT("false"), Options.bIncludeDefaultLikeProperties ? TEXT("true") : TEXT("false")));
+	AppendExportOptions(Options, OutText, false);
 	AppendLine(OutText, 0, TEXT(""));
+	AppendMaterialFunctionInstanceOverrides(MaterialFunction, OutText, 0, true);
 
 	AppendFunctionOutputs(FunctionForExport, OutText, 0);
 	AppendLine(OutText, 0, TEXT(""));
 
-	AppendLine(OutText, 0, FString::Printf(TEXT("function_node_count: %d"), Expressions.Num()));
-	AppendLine(OutText, 0, TEXT("function_nodes:"));
+	AppendLine(OutText, 0, FString::Printf(TEXT("function_nodes: count=%d"), Expressions.Num()));
 
 	FExportContext Context;
 	Context.Options = Options;
@@ -1476,16 +1924,17 @@ bool FUE2CodeMaterialExporter::ExportMaterialPropertyToString(UMaterialInterface
 	RemovePassthroughReroutes(Expressions);
 
 	OutText.Reset();
-	AppendLine(OutText, 0, TEXT("UE_NODE2CODE material_property_export version=2"));
+	AppendLine(OutText, 0, TEXT("UE_NODE2CODE material_property_export version=3"));
 	AppendAliasTable(OutText);
 	AppendEngineVersion(OutText);
 	AppendLine(OutText, 0, FString::Printf(TEXT("material_interface: %s"), *ObjectRef(Material)));
 	AppendLine(OutText, 0, FString::Printf(TEXT("base_material: %s"), *ObjectRef(BaseMaterial)));
 	AppendLine(OutText, 0, FString::Printf(TEXT("root_property: %s"), *MaterialPropertyToString(MaterialProperty)));
 	AppendLine(OutText, 0, FString::Printf(TEXT("root_connection: %s"), *DescribeInput(*RootInput)));
-	AppendLine(OutText, 0, FString::Printf(TEXT("options: expand_material_functions=%s function_definitions=deduplicated node_hierarchy_depth=%d max_function_depth=%d include_debug_metadata=%s include_default_like_properties=%s"), Options.bExpandMaterialFunctions ? TEXT("true") : TEXT("false"), Options.NodeHierarchyDepth, Options.MaxFunctionDepth, Options.bIncludeDebugMetadata ? TEXT("true") : TEXT("false"), Options.bIncludeDefaultLikeProperties ? TEXT("true") : TEXT("false")));
-	AppendLine(OutText, 0, FString::Printf(TEXT("material_node_count: %d"), Expressions.Num()));
-	AppendLine(OutText, 0, TEXT("material_nodes:"));
+	AppendExportOptions(Options, OutText, false);
+	AppendMaterialSettings(Material, BaseMaterial, OutText);
+	AppendMaterialInstanceOverrides(Material, BaseMaterial, OutText);
+	AppendLine(OutText, 0, FString::Printf(TEXT("material_nodes: count=%d"), Expressions.Num()));
 
 	FExportContext Context;
 	Context.Options = Options;
@@ -1572,7 +2021,11 @@ bool FUE2CodeMaterialExporter::ExportMaterialNodeByNameToString(UMaterialInterfa
 		return false;
 	}
 
-	OutText = FString::Printf(TEXT("source_material_interface: %s%s"), *ObjectRef(Material), LINE_TERMINATOR) + OutText;
+	FString SourcePrefix;
+	AppendLine(SourcePrefix, 0, FString::Printf(TEXT("source_material_interface: %s"), *ObjectRef(Material)));
+	AppendMaterialSettings(Material, BaseMaterial, SourcePrefix);
+	AppendMaterialInstanceOverrides(Material, BaseMaterial, SourcePrefix);
+	OutText = SourcePrefix + OutText;
 	OutError.Reset();
 	return true;
 }
@@ -1594,7 +2047,7 @@ bool FUE2CodeMaterialExporter::ExportMaterialExpressionToString(UMaterialExpress
 	RemovePassthroughReroutes(Expressions);
 
 	OutText.Reset();
-	AppendLine(OutText, 0, TEXT("UE_NODE2CODE material_node_export version=2"));
+	AppendLine(OutText, 0, TEXT("UE_NODE2CODE material_node_export version=3"));
 	AppendAliasTable(OutText);
 	AppendEngineVersion(OutText);
 	AppendLine(OutText, 0, FString::Printf(TEXT("root_node: %s"), *ExpressionRef(RootExpression)));
@@ -1602,9 +2055,8 @@ bool FUE2CodeMaterialExporter::ExportMaterialExpressionToString(UMaterialExpress
 	{
 		AppendLine(OutText, 0, FString::Printf(TEXT("root_path: %s"), *RootExpression->GetPathName()));
 	}
-	AppendLine(OutText, 0, FString::Printf(TEXT("options: expand_material_functions=%s function_definitions=deduplicated node_hierarchy_depth=%d max_function_depth=%d include_debug_metadata=%s include_default_like_properties=%s"), Options.bExpandMaterialFunctions ? TEXT("true") : TEXT("false"), Options.NodeHierarchyDepth, Options.MaxFunctionDepth, Options.bIncludeDebugMetadata ? TEXT("true") : TEXT("false"), Options.bIncludeDefaultLikeProperties ? TEXT("true") : TEXT("false")));
-	AppendLine(OutText, 0, FString::Printf(TEXT("material_node_count: %d"), Expressions.Num()));
-	AppendLine(OutText, 0, TEXT("material_nodes:"));
+	AppendExportOptions(Options, OutText, false);
+	AppendLine(OutText, 0, FString::Printf(TEXT("material_nodes: count=%d"), Expressions.Num()));
 
 	FExportContext Context;
 	Context.Options = Options;
@@ -1652,12 +2104,19 @@ FString FUE2CodeMaterialExporter::MaterialPropertyToString(EMaterialProperty Pro
 FString FUE2CodeMaterialExporter::NormalizeMaterialAssetPath(const FString& InputPath)
 {
 	FString Normalized = InputPath.TrimStartAndEnd();
+	Normalized = FPackageName::ExportTextPathToObjectPath(Normalized);
 	FPaths::NormalizeFilename(Normalized);
 
 	if (Normalized.EndsWith(TEXT(".uasset"), ESearchCase::IgnoreCase))
 	{
 		FString FullPath = FPaths::ConvertRelativePathToFull(Normalized);
 		FPaths::NormalizeFilename(FullPath);
+
+		FString LongPackageName;
+		if (FPackageName::TryConvertFilenameToLongPackageName(FullPath, LongPackageName))
+		{
+			return LongPackageName;
+		}
 
 		FString ContentDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir());
 		FPaths::NormalizeFilename(ContentDir);
@@ -1676,3 +2135,118 @@ FString FUE2CodeMaterialExporter::NormalizeMaterialAssetPath(const FString& Inpu
 
 	return Normalized;
 }
+
+#if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUE2CodeMaterialCompactSemanticsTest,
+	"UE_Node2Code.Material.CompactSemantics",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUE2CodeMaterialCompactSemanticsTest::RunTest(const FString& Parameters)
+{
+	TestEqual(
+		TEXT("Quoted text escapes quotes, slashes, tabs, and newlines"),
+		UE2CodeTextFormat::Quote(TEXT("a\"b\\c\tline\nnext")),
+		FString(TEXT("\"a\\\"b\\\\c\\tline\\nnext\""))
+	);
+
+	UMaterialExpressionConstant* Constant = NewObject<UMaterialExpressionConstant>();
+	Constant->R = 0.0f;
+
+	UMaterialExpressionReroute* Reroute = NewObject<UMaterialExpressionReroute>();
+	Reroute->Input.Expression = Constant;
+
+	UMaterialExpressionMultiply* Multiply = NewObject<UMaterialExpressionMultiply>();
+	Multiply->ConstA = 1.0f;
+	Multiply->ConstB = 9.0f;
+	Multiply->B.Expression = Reroute;
+
+	FUE2CodeExportOptions Options;
+	Options.bExportUnreferencedMaterialExpressions = false;
+	FString Text;
+	FString Error;
+	TestTrue(
+		TEXT("A compact material chain exports"),
+		FUE2CodeMaterialExporter::ExportMaterialExpressionToString(Multiply, Options, Text, Error)
+	);
+	TestTrue(TEXT("The compact material format uses the v3 header"), Text.Contains(TEXT("UE_NODE2CODE material_node_export version=3")));
+	TestTrue(TEXT("Material inputs use readable upstream arrows"), Text.Contains(TEXT(" <- ")));
+	TestTrue(TEXT("Material nodes use indentation without redundant end markers"), Text.Contains(TEXT("node ME_")) && !Text.Contains(TEXT("node_end")));
+	TestTrue(TEXT("Hierarchy depth is exposed as a common graph option"), Text.Contains(TEXT("hierarchy_depth: 0")));
+	TestTrue(TEXT("An active default input fallback is retained"), Text.Contains(TEXT("ConstA =")));
+	TestFalse(TEXT("An inactive fallback behind a connected input is omitted"), Text.Contains(TEXT("ConstB =")));
+	const bool bHasLiteralZero = Text.Contains(TEXT("- R = 0"));
+	if (!bHasLiteralZero)
+	{
+		AddError(TEXT("Literal-zero export was:") LINE_TERMINATOR + Text);
+	}
+	TestTrue(TEXT("A literal zero remains explicit"), bHasLiteralZero);
+	TestFalse(TEXT("Literal floats omit redundant trailing zeros"), Text.Contains(TEXT("- R = 0.000000")));
+	TestFalse(TEXT("A normal reroute is inlined"), Text.Contains(TEXT("MaterialExpressionReroute")));
+
+	FString SecondText;
+	Error.Reset();
+	TestTrue(
+		TEXT("The same compact material chain exports twice"),
+		FUE2CodeMaterialExporter::ExportMaterialExpressionToString(Multiply, Options, SecondText, Error)
+	);
+	TestEqual(TEXT("Default exports are deterministic"), Text, SecondText);
+
+	UMaterialExpressionScalarParameter* ScalarParameter = NewObject<UMaterialExpressionScalarParameter>();
+	ScalarParameter->ParameterName = TEXT("ZeroParameter");
+	ScalarParameter->DefaultValue = 0.0f;
+	Text.Reset();
+	Error.Reset();
+	TestTrue(
+		TEXT("A scalar parameter exports"),
+		FUE2CodeMaterialExporter::ExportMaterialExpressionToString(ScalarParameter, Options, Text, Error)
+	);
+	const bool bHasParameterDefault = Text.Contains(TEXT("DefaultValue ="));
+	if (!bHasParameterDefault)
+	{
+		AddError(TEXT("Zero-parameter export was:") LINE_TERMINATOR + Text);
+	}
+	TestTrue(TEXT("A parameter default remains explicit even when zero"), bHasParameterDefault);
+
+	UMaterial* Material = NewObject<UMaterial>();
+	Text.Reset();
+	Error.Reset();
+	TestTrue(
+		TEXT("A base material exports"),
+		FUE2CodeMaterialExporter::ExportMaterialToString(Material, Options, Text, Error)
+	);
+	TestTrue(TEXT("Rendering-critical material settings are retained"), Text.Contains(TEXT("material_settings: domain=")));
+	TestFalse(TEXT("Default output omits volatile timestamps"), Text.Contains(TEXT("exported_at_local:")));
+
+#if ENGINE_MAJOR_VERSION >= 5
+	UMaterialExpressionNamedRerouteDeclaration* Declaration = NewObject<UMaterialExpressionNamedRerouteDeclaration>();
+	Declaration->VariableGuid = FGuid::NewGuid();
+	Declaration->Input.Expression = Constant;
+	UMaterialExpressionNamedRerouteUsage* Usage = NewObject<UMaterialExpressionNamedRerouteUsage>();
+	Usage->Declaration = Declaration;
+	Usage->DeclarationGuid = Declaration->VariableGuid;
+	Multiply->B.Expression = Usage;
+
+	Text.Reset();
+	Error.Reset();
+	TestTrue(
+		TEXT("A chain through a named reroute exports"),
+		FUE2CodeMaterialExporter::ExportMaterialExpressionToString(Multiply, Options, Text, Error)
+	);
+	TestTrue(TEXT("The named reroute resolves to its declaration input"), Text.Contains(TEXT("type=ME_C ")));
+	TestFalse(TEXT("The named reroute is inlined"), Text.Contains(TEXT("NamedReroute")));
+#endif
+
+	const FString EngineMaterialPackage = TEXT("/Engine/EngineMaterials/DefaultMaterial");
+	const FString EngineMaterialFilename = FPackageName::LongPackageNameToFilename(
+		EngineMaterialPackage,
+		FPackageName::GetAssetPackageExtension()
+	);
+	TestEqual(
+		TEXT("Mounted engine .uasset filenames normalize to package paths"),
+		FUE2CodeMaterialExporter::NormalizeMaterialAssetPath(EngineMaterialFilename),
+		EngineMaterialPackage
+	);
+	return true;
+}
+#endif
