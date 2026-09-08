@@ -82,7 +82,7 @@ Window > UE Node2Code
 | --- | --- |
 | `Graph Asset` | 材质、材质函数、Niagara Function Script 或 Niagara Module Script 的资源路径、对象路径或 `.uasset` 文件路径 |
 | `Use Selected Asset` | 使用当前选中的受支持图资源，并自动切换导出模式 |
-| `Output File` | 输出 `.ue2code.txt` 文件 |
+| `Output File` | 输出 `.ue2code.txt` 文件；默认保存到 `<Project>/UE_Node2Code/` |
 | `Export Mode` | 选择材质、材质函数、Niagara Function/Module Script、属性链或节点链 |
 | `Material Property` | 属性模式下使用，例如 `MP_BaseColor` |
 | `Node Name` | 节点模式下使用，例如 `MaterialExpressionMultiply_3` |
@@ -335,7 +335,7 @@ Window options:
 | --- | --- |
 | `Graph Asset` | Material, Material Function, Niagara Function Script, or Niagara Module Script asset/object/`.uasset` path |
 | `Use Selected Asset` | Use the selected supported graph asset and switch mode automatically |
-| `Output File` | Target `.ue2code.txt` file |
+| `Output File` | Target `.ue2code.txt` file; defaults to `<Project>/UE_Node2Code/` |
 | `Export Mode` | Select Material, Material Function, Niagara Function/Module Script, property-chain, or node-chain export |
 | `Material Property` | Used in property mode, for example `MP_BaseColor` |
 | `Node Name` | Used in node mode, for example `MaterialExpressionMultiply_3` |

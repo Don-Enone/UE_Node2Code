@@ -144,7 +144,7 @@ namespace
 							MakeTextBoxRow(
 								LOCTEXT("OutputFile", "Output File"),
 								SAssignNew(OutputPathTextBox, SEditableTextBox)
-								.Text(FText::FromString(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / TEXT("Codex/MaterialExport.ue2code.txt"))))
+								.Text(FText::FromString(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / TEXT("UE_Node2Code/MaterialExport.ue2code.txt"))))
 							)
 						]
 						+ SVerticalBox::Slot()
@@ -392,7 +392,7 @@ namespace
 					}
 					MaterialPathTextBox->SetText(FText::FromString(NiagaraScript->GetPathName()));
 					const FString ShortName = NiagaraScript->GetName();
-					OutputPathTextBox->SetText(FText::FromString(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / FString::Printf(TEXT("Codex/%s.ue2code.txt"), *ShortName))));
+					OutputPathTextBox->SetText(FText::FromString(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / FString::Printf(TEXT("UE_Node2Code/%s.ue2code.txt"), *ShortName))));
 					return FReply::Handled();
 				}
 
@@ -400,7 +400,7 @@ namespace
 				{
 					MaterialPathTextBox->SetText(FText::FromString(Material->GetPathName()));
 					const FString ShortName = Material->GetName();
-					OutputPathTextBox->SetText(FText::FromString(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / FString::Printf(TEXT("Codex/%s.ue2code.txt"), *ShortName))));
+					OutputPathTextBox->SetText(FText::FromString(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / FString::Printf(TEXT("UE_Node2Code/%s.ue2code.txt"), *ShortName))));
 					SetMode(EUE2CodeExportMode::Material);
 					SetStatus(TEXT("Selected material applied."));
 					return FReply::Handled();
@@ -410,7 +410,7 @@ namespace
 				{
 					MaterialPathTextBox->SetText(FText::FromString(MaterialFunction->GetPathName()));
 					const FString ShortName = MaterialFunction->GetName();
-					OutputPathTextBox->SetText(FText::FromString(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / FString::Printf(TEXT("Codex/%s.ue2code.txt"), *ShortName))));
+					OutputPathTextBox->SetText(FText::FromString(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / FString::Printf(TEXT("UE_Node2Code/%s.ue2code.txt"), *ShortName))));
 					SetMode(EUE2CodeExportMode::MaterialFunction);
 					SetStatus(TEXT("Selected material function applied."));
 					return FReply::Handled();
