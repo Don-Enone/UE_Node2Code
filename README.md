@@ -2,9 +2,9 @@
 
 [中文](#中文) | [English](#english)
 
-UE Node2Code is an Unreal Engine 4.26+ editor plugin that exports Material, Material Function, Niagara Function Script, and Niagara Module Script graphs into compact, AI-readable text. It recursively expands called Material and Niagara graphs through one shared hierarchy-depth rule and produces text that is practical to paste into web-based AI chat tools.
+UE Node2Code is an Unreal Engine 4.26+ editor plugin that exports Blueprint, Material, Material Function, Niagara Function Script, and Niagara Module Script graphs into compact, AI-readable text. It expands called graphs with a shared hierarchy-depth control and produces text that is practical to paste into web-based AI chat tools.
 
-Default exports are optimized for AI context windows: unreachable nodes, volatile metadata, ineffective fallbacks, and layout data are omitted unless explicitly requested.
+Material and Niagara exports are optimized for AI context windows: unreachable nodes, volatile metadata, ineffective fallbacks, and layout data are omitted unless explicitly requested. Blueprint exports compact numbers and names, inline simple reroutes, and omit redundant pins and metadata while retaining computational nodes.
 
 ## 中文
 
@@ -14,11 +14,33 @@ Default exports are optimized for AI context windows: unreachable nodes, volatil
 
 它不会只停留在表层调用节点。默认情况下，插件会打开 Material Function 或 Niagara FunctionCall 指向的脚本，继续导出内部图；嵌套调用也会按统一层级规则递归展开，直到基础节点或用户设置的深度限制。
 
-当前版本支持材质节点、Material Function、Niagara Function Script 和 Niagara Module Script 直接导出。蓝图节点暂未支持。
+当前版本支持 Blueprint、材质节点、Material Function、Niagara Function Script 和 Niagara Module Script 直接导出。
 
-源码目标是 UE 4.26 及后续版本通用。当前材质与 Niagara 导出已在 UE 4.26 和 UE 5.8 完成插件打包编译与自动化测试。
+### 蓝图导出（0.7）
 
-默认导出针对 AI 上下文窗口做了裁剪：不可达节点、易变调试元数据、无效回退值和布局信息不会输出，除非用户显式启用对应选项。
+在内容浏览器选中蓝图，打开 `Window > UE Node2Code`，点击 `Use Selected Asset`，或手动将 Export Mode 设为 `Blueprint` 并填入蓝图资源路径，然后导出。
+
+```text
+UE_Node2Code.ExportBlueprint /Game/Blueprints/BP_Example D:/Exports/BP_Example.ue2code.txt 0
+```
+
+C++ 使用 `FUE2CodeBlueprintExporter`；编辑器蓝图/Python 使用 `UUE2CodeBlueprintLibrary` 新增的 `ExportBlueprintAssetPathToText`、`ExportBlueprintToText`、`ExportBlueprintToString`。路径支持 `/Game/...`、复制的资源引用和项目内 `.uasset` 文件路径；请传入蓝图资源，而非生成类的 `_C` 路径。
+
+- 导出资产自身的顶层事件图、函数图（含 Construction Script）、宏图及接口签名图；保留计算节点（包含未连接节点），普通转接节点默认内联。
+- 输出节点类型、函数/变量/事件引用、引脚类型（含数组、集合、映射）、未连接输入的有效默认值、拆分引脚关系、执行流与数据连线，以及声明变量的默认值。
+- 折叠图、宏实例和可解析到蓝图函数的调用按层级展开；共用定义去重，循环引用安全终止。已确认的原生函数标为 `impl=native`，其他无法解析的实现标为 `native_or_unavailable`。
+- 整个蓝图资产的顶层图均属于第 1 层；`NodeHierarchyDepth=1` 不再展开嵌套图或外部蓝图调用，`0` 递归展开至安全上限。已导出的本资产顶层函数始终可以被引用。
+- 本功能导出可读图结构，不是可编译的 C++ 转译器或完整资产序列化器。组件模板、Timeline 曲线、Widget 布局、动画状态机的专用属性及第三方节点私有数据不在完整支持范围；它们的通用节点/引脚信息仍可读取。导出不会编译或保存源蓝图。
+
+蓝图文本以 `UE_NODE2CODE blueprint_export version=2` 开头，使用 `G0` 图 ID、图内 `N0.P0` 节点/引脚 ID 和 `->` 连线。详见 `ForAitoRead_zh.md`。
+
+0.7.1 默认启用蓝图压缩：`150.000000` → `150`，`(X=0.000000,Y=0.000000,Z=200.000000)` → `(X=0,Y=0,Z=200)`；结构体字段及拆分引脚去掉生成的序号/GUID 后缀；资源与类型使用短名（重名时保留完整路径以区分）。静态函数隐藏的 `self`、未使用的数据输出、重复标题与原生调用标记会省略或合并，节点类型用 `K2_` 代替 `K2Node_`。函数/宏签名、执行引脚、注释及有效默认值保留。浮点数只删除小数尾零，不经过浮点转换或舍入；字符串、Name、Text 和真正的 GUID 值不做数值改写。
+
+勾选 `Include Debug Metadata` 可保留原始路径、引脚名、数值格式、未使用输出及转接节点。循环、断开、带注释或孤立引脚的转接链不会被强行内联。
+
+源码目标是 UE 4.26 及后续版本通用。0.7.1 在 UE 4.26 和 UE 5.8 均通过插件打包编译和 5 项自动化测试。GameEffect 实例从 99,530 字节降至 66,838 字节（减少 32.85%）；5 个图内联 26 个转接节点后，237 条有效连线逐条核对一致。
+
+材质与 Niagara 默认导出针对 AI 上下文窗口做了裁剪：不可达节点、易变调试元数据、无效回退值和布局信息不会输出，除非用户显式启用对应选项。蓝图保留计算节点，同时精简数值、命名、转接节点和冗余引脚。
 
 ### 主要功能
 
@@ -251,7 +273,7 @@ ForAitoRead_en.md
 ### 路线图
 
 - 支持更多材质节点语义压缩。
-- 支持蓝图节点导出。
+- 扩展蓝图专用节点、Timeline 曲线和组件模板的语义支持。
 - 增加更多导出格式选项。
 - 继续增加更多 UE 版本兼容性测试。
 
@@ -267,11 +289,29 @@ ForAitoRead_en.md
 
 It does not stop at surface-level call nodes. By default, the plugin opens Material Functions and Niagara FunctionCall targets, exports their internal graphs, and recursively follows nested calls until basic nodes or the configured hierarchy limit.
 
-The current version supports Material nodes, direct Material Function export, Niagara Function Script export, and Niagara Module Script export. Blueprint nodes are not supported yet.
+The current version also supports Blueprint graph export.
 
-The source target is Unreal Engine 4.26 and later. The current Material and Niagara exporters have passed plugin packaging builds and automation tests on UE 4.26 and UE 5.8.
+### Blueprint export (0.7)
 
-Default exports are pruned for AI context windows: unreachable nodes, volatile debug metadata, ineffective fallbacks, and layout data are omitted unless explicitly requested.
+Select a Blueprint in the Content Browser, open `Window > UE Node2Code`, and click `Use Selected Asset`. Alternatively select `Blueprint` as the export mode and enter the asset path. The console equivalent is:
+
+```text
+UE_Node2Code.ExportBlueprint /Game/Blueprints/BP_Example D:/Exports/BP_Example.ue2code.txt 0
+```
+
+C++ uses `FUE2CodeBlueprintExporter`. Editor Blueprint/Python callers can use `ExportBlueprintAssetPathToText`, `ExportBlueprintToText`, and `ExportBlueprintToString` on `UUE2CodeBlueprintLibrary`. Paths accept package names, copied asset references, or project `.uasset` filenames; pass the Blueprint asset, not its generated `_C` class.
+
+The exporter includes the asset's top-level event, function (including Construction Script), macro, and interface signature graphs, retaining disconnected computational nodes. Output preserves member references, pin/container types, effective input defaults, split-pin relationships, execution/data links, and declared variable defaults. Collapsed graphs, macro instances, and resolvable Blueprint function calls expand with deduplication and cycle protection. Confirmed native functions use `impl=native`; unresolved calls remain explicit external references.
+
+Version 0.7.1 trims trailing fractional zeros without rounding, shortens generated struct-field/pin names and resource paths, inlines simple reroutes, omits unused data outputs and redundant static-library self pins, and merges redundant call metadata. Short-name collisions fall back to full paths. Node types abbreviate `K2Node_` as `K2_`. String/Name/Text data, actual GUID values, signature pins, execution pins, comments and effective defaults are preserved. `Include Debug Metadata` retains original spellings, paths, outputs and reroutes. Cyclic, disconnected, annotated or orphaned reroutes are retained.
+
+All top-level graphs in the requested Blueprint count as layer 1. Depth 1 excludes nested graphs and external Blueprint implementations; depth 0 expands up to the safety limit. A function already exported as a root graph can always be referenced.
+
+This is a graph export, not a C++ compiler or full asset serializer. Component templates, Timeline curves, Widget layouts, specialized animation-state properties, and private third-party node data are not fully represented. Export does not compile or save the source Blueprint. See `ForAitoRead_en.md` for the `blueprint_export version=2` format.
+
+The source target is Unreal Engine 4.26 and later. Version 0.7.1 passes packaging builds and all five automation tests on UE 4.26 and UE 5.8. A GameEffect export decreased from 99,530 to 66,838 bytes (32.85%); all 237 effective connections across five graphs were verified after inlining 26 reroutes.
+
+Material and Niagara exports are pruned for AI context windows. Blueprint exports retain computational nodes and compact numbers, names, reroutes, redundant pins and metadata.
 
 ### Features
 
@@ -504,7 +544,7 @@ The default target is web-based AI. It cannot read local asset files, so full pa
 ### Roadmap
 
 - Add more material-node semantic compression.
-- Add Blueprint node export.
+- Expand support for specialized Blueprint nodes, Timeline curves, and component templates.
 - Add more output format options.
 - Continue adding compatibility tests across Unreal Engine versions.
 

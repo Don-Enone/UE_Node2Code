@@ -11,9 +11,22 @@ UE_NODE2CODE material_property_export version=3
 UE_NODE2CODE material_node_export version=3
 UE_NODE2CODE niagara_function_script_export version=2
 UE_NODE2CODE niagara_module_script_export version=2
+UE_NODE2CODE blueprint_export version=2
 ```
 
 材质类型可能使用 `type_aliases`，例如 `ME_Mul=MaterialExpressionMultiply`。后续短类型与节点 ID 应按该表理解。
+
+### 蓝图图结构
+
+`graphs` 中每个图定义使用 `G0`、`G1` 等 ID。目标蓝图资产的全部顶层图均为第 1 层根图，嵌套图和外部调用图按 `hierarchy_depth` 展开。`call ref=G...` 指向复用的定义，也可指向递归调用的已有图。`ref=external reason=depth_limit` 表示深度限制省略了实现；`native_or_unavailable` 表示没有可解析的蓝图实现，不要猜测其内部逻辑。
+
+节点/引脚 ID 在图内有效，如 `N0`、`N0.P0`。引脚包含方向、类型、未连接输入的有效默认值、隐藏/孤立状态和拆分引脚的父引用。`links` 中 `输出引脚 -> 输入引脚` 同时表示执行连线和数据连线。已连接引脚的存储默认值不起作用，因此不导出。字符串中的 `\n` 为换行转义，`\\n` 为字面反斜杠加 n；材质 Custom 的 `Code = |` 则使用保留缩进的实际多行代码。
+
+`function`、`variable`、`event` 标明成员及所有者/作用域；`property` 包含部分节点配置。`variables` 为本资产声明的变量，优先读取已有编译类的默认值，没有编译类则读取编辑器描述默认值；导出器不主动请求编译。未连接的计算节点仍保留，不能假定每个节点都会执行。禁用/仅开发节点会显式标记。原生 C++ 实现、组件模板、Timeline 曲线、Widget 布局、专用动画/第三方节点属性不属于本格式的完整覆盖范围。
+
+蓝图 v2 默认压缩：`K2_` 还原为 `K2Node_`；已确认的原生函数用 `impl=native` 标识外部实现，不能把它当作丢失的连线。纯函数标为 `pure=true`。已有图引用时不重复输出目标路径。资源路径使用短名，重名时保留完整路径区分。数值按类型删除小数末尾零而不舍入，字符串、Name、Text 与真实 GUID 值不做此改写。仅结构体字段和引脚标签移除生成的 `_序号_GUID` 后缀；连线始终以引脚 ID 为准，拆分引脚另有父引用。
+
+单一上游来源的正常转接链会被内联，全部有效连线及分支保留；循环、断开、带注释或孤立引脚的链保留原节点。未使用的数据输出和静态函数冗余的隐藏 self 引脚会省略，执行引脚及函数/宏签名引脚保留，因此引脚编号可能不连续。调试元数据模式保留原始命名、路径、数值写法、转接节点及未使用输出。两种模式均保留注释。
 
 ## 2. 通用层级规则
 

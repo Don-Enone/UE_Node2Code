@@ -8,6 +8,7 @@
 #include "MaterialShared.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialExpression.h"
+#include "Materials/MaterialExpressionCustom.h"
 #include "Materials/MaterialExpressionFunctionInput.h"
 #include "Materials/MaterialExpressionFunctionOutput.h"
 #include "Materials/MaterialExpressionMaterialFunctionCall.h"
@@ -1424,11 +1425,29 @@ namespace UE2CodeMaterialExporterPrivate
 				continue;
 			}
 
-			AppendLine(
-				PropertyText,
-				Depth + 1,
-				FString::Printf(TEXT("- %s = %s"), *Property->GetName(), *ValueText)
-			);
+			const UMaterialExpressionCustom* Custom = Cast<UMaterialExpressionCustom>(Expression);
+			if (Custom && Property->GetFName() == FName(TEXT("Code")))
+			{
+				// Read the source directly: unescaping ValueText would also alter literal backslashes.
+				FString Code = Custom->Code;
+				Code.ReplaceInline(TEXT("\r\n"), TEXT("\n"));
+				Code.ReplaceInline(TEXT("\r"), TEXT("\n"));
+				TArray<FString> CodeLines;
+				Code.ParseIntoArray(CodeLines, TEXT("\n"), false);
+				AppendLine(PropertyText, Depth + 1, TEXT("- Code = |"));
+				for (const FString& CodeLine : CodeLines)
+				{
+					AppendLine(PropertyText, Depth + 2, CodeLine);
+				}
+			}
+			else
+			{
+				AppendLine(
+					PropertyText,
+					Depth + 1,
+					FString::Printf(TEXT("- %s = %s"), *Property->GetName(), *ValueText)
+				);
+			}
 			++PropertyCount;
 		}
 

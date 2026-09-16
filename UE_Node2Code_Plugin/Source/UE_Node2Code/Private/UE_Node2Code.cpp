@@ -18,6 +18,8 @@
 #include "NiagaraScript.h"
 #include "UE2CodeMaterialExporter.h"
 #include "UE2CodeNiagaraExporter.h"
+#include "UE2CodeBlueprintExporter.h"
+#include "Engine/Blueprint.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
@@ -43,7 +45,8 @@ namespace
 		NiagaraFunctionScript,
 		NiagaraModuleScript,
 		MaterialProperty,
-		MaterialNode
+		MaterialNode,
+		Blueprint
 	};
 
 	static void ApplyOptionalHierarchyDepth(const TArray<FString>& Args, int32 ArgIndex, FUE2CodeExportOptions& Options)
@@ -90,6 +93,7 @@ namespace
 			ModeOptions.Add(MakeShared<FString>(TEXT("Niagara Module Script")));
 			ModeOptions.Add(MakeShared<FString>(TEXT("Material Property")));
 			ModeOptions.Add(MakeShared<FString>(TEXT("Material Node")));
+			ModeOptions.Add(MakeShared<FString>(TEXT("Blueprint")));
 			SelectedMode = ModeOptions[static_cast<int32>(EUE2CodeExportMode::Material)];
 
 			ChildSlot
@@ -373,6 +377,15 @@ namespace
 			GEditor->GetSelectedObjects()->GetSelectedObjects(SelectedObjects);
 			for (UObject* Object : SelectedObjects)
 			{
+				if (UBlueprint* Blueprint = Cast<UBlueprint>(Object))
+				{
+					MaterialPathTextBox->SetText(FText::FromString(Blueprint->GetPathName()));
+					OutputPathTextBox->SetText(FText::FromString(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / FString::Printf(TEXT("UE_Node2Code/%s.ue2code.txt"), *Blueprint->GetName()))));
+					SetMode(EUE2CodeExportMode::Blueprint);
+					SetStatus(TEXT("Selected Blueprint applied."));
+					return FReply::Handled();
+				}
+
 				if (UNiagaraScript* NiagaraScript = Cast<UNiagaraScript>(Object))
 				{
 					if (NiagaraScript->IsFunctionScript())
@@ -417,7 +430,7 @@ namespace
 				}
 			}
 
-			SetStatus(TEXT("Selection does not contain a material, material function, Niagara Function Script, or Niagara Module Script."));
+			SetStatus(TEXT("Selection does not contain a Blueprint, material, material function, Niagara Function Script, or Niagara Module Script."));
 			return FReply::Handled();
 		}
 
@@ -469,7 +482,11 @@ namespace
 
 			FString Error;
 			bool bSuccess = false;
-			if (IsMode(EUE2CodeExportMode::Material))
+			if (IsMode(EUE2CodeExportMode::Blueprint))
+			{
+				bSuccess = FUE2CodeBlueprintExporter::ExportBlueprintAssetPathToText(MaterialPath, OutputPath, Options, Error);
+			}
+			else if (IsMode(EUE2CodeExportMode::Material))
 			{
 				bSuccess = FUE2CodeMaterialExporter::ExportMaterialAssetPathToText(MaterialPath, OutputPath, Options, Error);
 			}
@@ -624,6 +641,12 @@ TSharedRef<SDockTab> FUE2CodeModule::SpawnExportTab(const FSpawnTabArgs& SpawnTa
 
 void FUE2CodeModule::RegisterConsoleCommands()
 {
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("UE_Node2Code.ExportBlueprint"),
+		TEXT("Exports Blueprint graphs to AI-readable text. Args: <BlueprintAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]"),
+		FConsoleCommandWithArgsDelegate::CreateRaw(this, &FUE2CodeModule::ExportBlueprintCommand),
+		ECVF_Default
+	));
 	IConsoleManager& ConsoleManager = IConsoleManager::Get();
 
 	ConsoleCommands.Add(ConsoleManager.RegisterConsoleCommand(
@@ -696,6 +719,26 @@ void FUE2CodeModule::ExportMaterialCommand(const TArray<FString>& Args)
 	if (FUE2CodeMaterialExporter::ExportMaterialAssetPathToText(Args[0], Args[1], Options, Error))
 	{
 		UE_LOG(LogUE2Code, Display, TEXT("Exported material graph to %s"), *Args[1]);
+	}
+	else
+	{
+		UE_LOG(LogUE2Code, Error, TEXT("%s"), *Error);
+	}
+}
+
+void FUE2CodeModule::ExportBlueprintCommand(const TArray<FString>& Args)
+{
+	if (Args.Num() < 2)
+	{
+		UE_LOG(LogUE2Code, Error, TEXT("Usage: UE_Node2Code.ExportBlueprint <BlueprintAssetPathOrUAssetFile> <OutputFilePath> [NodeHierarchyDepth]"));
+		return;
+	}
+	FString Error;
+	FUE2CodeExportOptions Options;
+	ApplyOptionalHierarchyDepth(Args, 2, Options);
+	if (FUE2CodeBlueprintExporter::ExportBlueprintAssetPathToText(Args[0], Args[1], Options, Error))
+	{
+		UE_LOG(LogUE2Code, Display, TEXT("Exported Blueprint graphs to %s"), *Args[1]);
 	}
 	else
 	{

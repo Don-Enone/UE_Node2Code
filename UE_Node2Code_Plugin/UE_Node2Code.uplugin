@@ -1,9 +1,9 @@
 {
 	"FileVersion": 3,
-	"Version": 6,
-	"VersionName": "0.6.0",
+	"Version": 8,
+	"VersionName": "0.7.1",
 	"FriendlyName": "UE Node2Code",
-	"Description": "Exports Material, Material Function, Niagara Function Script, and Niagara Module Script graphs into AI-readable text.",
+	"Description": "Exports Blueprint, Material, Material Function, Niagara Function Script, and Niagara Module Script graphs into AI-readable text.",
 	"Category": "AI",
 	"CreatedBy": "Codex",
 	"CanContainContent": false,

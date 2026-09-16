@@ -19,6 +19,7 @@ public class UE_Node2Code : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
+				"BlueprintGraph",
 				"DesktopPlatform",
 				"InputCore",
 				"LevelEditor",

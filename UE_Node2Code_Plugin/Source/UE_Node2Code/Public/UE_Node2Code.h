@@ -25,6 +25,7 @@ private:
 	TSharedRef<SDockTab> SpawnExportTab(const FSpawnTabArgs& SpawnTabArgs);
 
 	void ExportMaterialCommand(const TArray<FString>& Args);
+	void ExportBlueprintCommand(const TArray<FString>& Args);
 	void ExportMaterialFunctionCommand(const TArray<FString>& Args);
 	void ExportNiagaraFunctionScriptCommand(const TArray<FString>& Args);
 	void ExportNiagaraModuleScriptCommand(const TArray<FString>& Args);

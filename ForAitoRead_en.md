@@ -11,9 +11,22 @@ UE_NODE2CODE material_property_export version=3
 UE_NODE2CODE material_node_export version=3
 UE_NODE2CODE niagara_function_script_export version=2
 UE_NODE2CODE niagara_module_script_export version=2
+UE_NODE2CODE blueprint_export version=2
 ```
 
 Material exports may contain `type_aliases`, such as `ME_Mul=MaterialExpressionMultiply`. Interpret later short types and IDs through that table.
+
+### Blueprint graphs
+
+`graphs` contains definitions identified by `G0`, `G1`, etc. Every top-level graph of the requested asset is a layer-1 root; nested and external called graphs expand according to `hierarchy_depth`. `call ref=G...` reuses a definition, including recursive references. `ref=external reason=depth_limit` means the implementation was omitted; `native_or_unavailable` means there is no resolvable Blueprint graph. Do not invent those implementations.
+
+Node IDs and pin IDs are local to each graph (`N0`, `N0.P0`). Pin declarations record direction, type, effective unconnected input default, hidden/orphaned state, and split-pin parent. `links` lists output-to-input arrows for both execution and data. A connected pin's stored default is inactive and omitted. String escapes remain literal format escapes, so `\n` represents a newline while `\\n` represents backslash plus n. Material Custom `Code = |` blocks instead contain actual source lines with indentation.
+
+`function`, `variable`, and `event` fields identify members and their owner/scope; `property` fields carry selected node settings. `variables` contains the asset's own declared variables, using compiled class defaults when available, otherwise the editor description's default. The exporter does not request compilation. Disconnected computational nodes remain: do not assume every node executes. Disabled/development-only nodes are explicitly marked. Native C++ behavior, component templates, Timeline curves, Widget layout, and specialized third-party/animation properties are not a complete part of this graph format.
+
+Blueprint v2 defaults to compact output. `K2_` expands to `K2Node_`. Known native functions use `impl=native`; this is an explicit external implementation, not a missing link. Pure calls use `pure=true`. Repeated call targets already identified by a graph reference are omitted. Paths become short names unless they collide, in which case full paths disambiguate them. Typed decimal values lose fractional trailing zeros without rounding; string/name/text data and actual GUID values are not rewritten. Generated `_number_GUID` suffixes are removed from struct field and pin labels only; pin IDs remain authoritative, and split children identify their parent separately.
+
+Well-formed reroutes with one upstream source are inlined; all effective links and fan-out remain. Cyclic, disconnected, annotated and orphaned chains are retained. Unused data outputs and redundant hidden static-function self pins are omitted, while execution and function/macro signature pins remain. Pin index gaps are expected. Debug metadata mode preserves raw names, paths, numeric spellings, reroutes and unused outputs. Comments remain in both modes.
 
 ## 2. Shared Hierarchy Rule
 

@@ -1,5 +1,20 @@
 #include "UE2CodeBlueprintLibrary.h"
 
+bool UUE2CodeBlueprintLibrary::ExportBlueprintAssetPathToText(const FString& BlueprintAssetPath, const FString& OutputFilePath, FUE2CodeExportOptions Options, FString& OutError)
+{
+	return FUE2CodeBlueprintExporter::ExportBlueprintAssetPathToText(BlueprintAssetPath, OutputFilePath, Options, OutError);
+}
+
+bool UUE2CodeBlueprintLibrary::ExportBlueprintToText(UBlueprint* Blueprint, const FString& OutputFilePath, FUE2CodeExportOptions Options, FString& OutError)
+{
+	return FUE2CodeBlueprintExporter::ExportBlueprintToText(Blueprint, OutputFilePath, Options, OutError);
+}
+
+bool UUE2CodeBlueprintLibrary::ExportBlueprintToString(UBlueprint* Blueprint, FUE2CodeExportOptions Options, FString& OutText, FString& OutError)
+{
+	return FUE2CodeBlueprintExporter::ExportBlueprintToString(Blueprint, Options, OutText, OutError);
+}
+
 bool UUE2CodeBlueprintLibrary::ExportMaterialAssetPathToText(const FString& MaterialAssetPath, const FString& OutputFilePath, FUE2CodeExportOptions Options, FString& OutError)
 {
 	return FUE2CodeMaterialExporter::ExportMaterialAssetPathToText(MaterialAssetPath, OutputFilePath, Options, OutError);
