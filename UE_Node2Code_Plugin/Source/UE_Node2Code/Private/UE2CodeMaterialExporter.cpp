@@ -1,6 +1,7 @@
 #include "UE2CodeMaterialExporter.h"
 
 #include "UE2CodeEngineCompat.h"
+#include "UE2CodeSelection.h"
 #include "UE2CodeTextFormat.h"
 
 #include "HAL/FileManager.h"
@@ -1099,8 +1100,46 @@ namespace UE2CodeMaterialExporterPrivate
 		TArray<const UMaterialFunctionInterface*> FunctionOrder;
 		TArray<const UMaterialFunctionInterface*> FunctionStack;
 		TMap<const UMaterialExpression*, FString> LayoutHints;
+		// Set only for selected-node exports; applies to the root graph, not function definitions.
+		const TSet<const UMaterialExpression*>* SelectedExpressions = nullptr;
 		int32 NextFunctionId = 1;
 	};
+
+	static bool IsSelectedSource(const FExpressionInput& Input, const TSet<const UMaterialExpression*>& Selected)
+	{
+		const UMaterialExpression* SourceExpression = nullptr;
+		int32 SourceOutputIndex = 0;
+		return ResolveInputSource(Input, SourceExpression, SourceOutputIndex) && Selected.Contains(SourceExpression);
+	}
+
+	static FString ConnectionFields(const FExpressionInput& Input, const FExportContext& Context)
+	{
+		FString Result = CompactConnectionFields(Input);
+		if (Context.SelectedExpressions && Context.FunctionStack.Num() == 0 && Input.Expression && !IsSelectedSource(Input, *Context.SelectedExpressions))
+		{
+			Result += TEXT(" unselected");
+		}
+		return Result;
+	}
+
+	static TSet<const UMaterialExpression*> ExpressionSet(const TArray<UMaterialExpression*>& Expressions)
+	{
+		TSet<const UMaterialExpression*> Result;
+		for (const UMaterialExpression* Expression : Expressions) { Result.Add(Expression); }
+		return Result;
+	}
+
+	static void SelectExpressions(const TArray<UMaterialExpression*>& Candidates, const UE2CodeSelection::FNodeSelection& Selection, TArray<UMaterialExpression*>& OutExpressions)
+	{
+		TSet<UMaterialExpression*> Seen;
+		for (UMaterialExpression* Expression : Candidates)
+		{
+			if (Expression && Selection.Contains(Expression, Expression->GetMaterialExpressionId()))
+			{
+				AddUniqueExpression(Expression, OutExpressions, Seen);
+			}
+		}
+	}
 
 	static void AppendExpressionBlock(UMaterialExpression* Expression, FString& OutText, int32 Depth, FExportContext& Context);
 	static void AppendFunctionDefinitions(FString& OutText, int32 Depth, FExportContext& Context);
@@ -1296,7 +1335,7 @@ namespace UE2CodeMaterialExporterPrivate
 			}
 
 			const FString InputName = InputExpression ? InputExpression->InputName.ToString() : FunctionCall->GetInputName(InputIndex).ToString();
-			FString BindingLine = FString::Printf(TEXT("- [%d] %s %s"), InputIndex, *MaybeQuotedName(InputName), *CompactConnectionFields(FunctionInput.Input));
+			FString BindingLine = FString::Printf(TEXT("- [%d] %s %s"), InputIndex, *MaybeQuotedName(InputName), *ConnectionFields(FunctionInput.Input, Context));
 			if (Context.Options.bIncludeDebugMetadata)
 			{
 				BindingLine += FString::Printf(TEXT(" input_id=%s"), *GuidToString(FunctionInput.ExpressionInputId));
@@ -1556,7 +1595,7 @@ namespace UE2CodeMaterialExporterPrivate
 					AppendLine(
 						InputText,
 						Depth + 2,
-						FString::Printf(TEXT("- [%d] %s %s"), InputIndex, *MaybeQuotedName(InputName), *CompactConnectionFields(*Input))
+						FString::Printf(TEXT("- [%d] %s %s"), InputIndex, *MaybeQuotedName(InputName), *ConnectionFields(*Input, Context))
 					);
 					++ConnectedInputCount;
 				}
@@ -1580,7 +1619,8 @@ namespace UE2CodeMaterialExporterPrivate
 
 	}
 
-	static void AppendMaterialRoots(UMaterial* Material, FString& OutText, int32 Depth)
+	// With a selection, only outputs fed directly by a selected node are listed.
+	static void AppendMaterialRoots(UMaterial* Material, FString& OutText, int32 Depth, const TSet<const UMaterialExpression*>* Selected = nullptr)
 	{
 		AppendLine(OutText, Depth, TEXT("material_outputs:"));
 		int32 ConnectedCount = 0;
@@ -1589,7 +1629,7 @@ namespace UE2CodeMaterialExporterPrivate
 		{
 			const EMaterialProperty MaterialProperty = static_cast<EMaterialProperty>(PropertyIndex);
 			FExpressionInput* Input = Material->GetExpressionInputForProperty(MaterialProperty);
-			if (!Input || !Input->Expression)
+			if (!Input || !Input->Expression || (Selected && !IsSelectedSource(*Input, *Selected)))
 			{
 				continue;
 			}
@@ -1612,7 +1652,8 @@ namespace UE2CodeMaterialExporterPrivate
 		}
 	}
 
-	static void AppendFunctionOutputs(const UMaterialFunctionInterface* Function, FString& OutText, int32 Depth)
+	// With a selection, only outputs that are selected or fed by a selected node are listed.
+	static void AppendFunctionOutputs(const UMaterialFunctionInterface* Function, FString& OutText, int32 Depth, const TSet<const UMaterialExpression*>* Selected = nullptr)
 	{
 		AppendLine(OutText, Depth, TEXT("function_outputs:"));
 		int32 ConnectedCount = 0;
@@ -1623,7 +1664,8 @@ namespace UE2CodeMaterialExporterPrivate
 			for (UMaterialExpression* Expression : FunctionExpressions)
 			{
 				UMaterialExpressionFunctionOutput* FunctionOutput = Cast<UMaterialExpressionFunctionOutput>(Expression);
-				if (!FunctionOutput || !FunctionOutput->A.Expression)
+				if (!FunctionOutput || !FunctionOutput->A.Expression
+					|| (Selected && !Selected->Contains(FunctionOutput) && !IsSelectedSource(FunctionOutput->A, *Selected)))
 				{
 					continue;
 				}
@@ -1757,6 +1799,48 @@ bool FUE2CodeMaterialExporter::ExportMaterialToString(UMaterialInterface* Materi
 		return false;
 	}
 
+	const UE2CodeSelection::FNodeSelection Selection(Options);
+	TArray<UMaterialExpression*> Expressions;
+	TSet<UMaterialExpression*> SeenExpressions;
+
+	if (Selection.IsActive())
+	{
+		TArray<UMaterialExpression*> MaterialExpressions;
+		UE2CodeEngineCompat::GetMaterialExpressions(BaseMaterial, MaterialExpressions);
+		SelectExpressions(MaterialExpressions, Selection, Expressions);
+		if (Expressions.Num() == 0)
+		{
+			OutText.Reset();
+			OutError = UE2CodeSelection::NoMatchError(ObjectRef(Material));
+			return false;
+		}
+	}
+	else
+	{
+		for (int32 PropertyIndex = 0; PropertyIndex < MP_MAX; ++PropertyIndex)
+		{
+			FExpressionInput* Input = BaseMaterial->GetExpressionInputForProperty(static_cast<EMaterialProperty>(PropertyIndex));
+			if (Input && Input->Expression)
+			{
+				CollectUpstreamExpressions(Input->Expression, Expressions, SeenExpressions);
+			}
+		}
+
+		if (Options.bExportUnreferencedMaterialExpressions)
+		{
+			TArray<UMaterialExpression*> MaterialExpressions;
+			UE2CodeEngineCompat::GetMaterialExpressions(BaseMaterial, MaterialExpressions);
+			for (UMaterialExpression* Expression : MaterialExpressions)
+			{
+				AddUniqueExpression(Expression, Expressions, SeenExpressions);
+			}
+		}
+	}
+
+	SortExpressions(Expressions);
+	RemovePassthroughReroutes(Expressions);
+	const TSet<const UMaterialExpression*> SelectedExpressions = ExpressionSet(Expressions);
+
 	OutText.Reset();
 	AppendLine(OutText, 0, TEXT("UE_NODE2CODE material_export version=3"));
 	AppendAliasTable(OutText);
@@ -1768,42 +1852,22 @@ bool FUE2CodeMaterialExporter::ExportMaterialToString(UMaterialInterface* Materi
 	AppendLine(OutText, 0, FString::Printf(TEXT("material_interface: %s"), *ObjectRef(Material)));
 	AppendLine(OutText, 0, FString::Printf(TEXT("base_material: %s"), *ObjectRef(BaseMaterial)));
 	AppendExportOptions(Options, OutText, true);
+	if (Selection.IsActive())
+	{
+		AppendLine(OutText, 0, UE2CodeSelection::HeaderLine(Expressions.Num()));
+	}
 	AppendLine(OutText, 0, TEXT(""));
 	AppendMaterialSettings(Material, BaseMaterial, OutText);
 	AppendMaterialInstanceOverrides(Material, BaseMaterial, OutText);
 
-	AppendMaterialRoots(BaseMaterial, OutText, 0);
+	AppendMaterialRoots(BaseMaterial, OutText, 0, Selection.IsActive() ? &SelectedExpressions : nullptr);
 	AppendLine(OutText, 0, TEXT(""));
-
-	TArray<UMaterialExpression*> Expressions;
-	TSet<UMaterialExpression*> SeenExpressions;
-
-	for (int32 PropertyIndex = 0; PropertyIndex < MP_MAX; ++PropertyIndex)
-	{
-		FExpressionInput* Input = BaseMaterial->GetExpressionInputForProperty(static_cast<EMaterialProperty>(PropertyIndex));
-		if (Input && Input->Expression)
-		{
-			CollectUpstreamExpressions(Input->Expression, Expressions, SeenExpressions);
-		}
-	}
-
-	if (Options.bExportUnreferencedMaterialExpressions)
-	{
-		TArray<UMaterialExpression*> MaterialExpressions;
-		UE2CodeEngineCompat::GetMaterialExpressions(BaseMaterial, MaterialExpressions);
-		for (UMaterialExpression* Expression : MaterialExpressions)
-		{
-			AddUniqueExpression(Expression, Expressions, SeenExpressions);
-		}
-	}
-
-	SortExpressions(Expressions);
-	RemovePassthroughReroutes(Expressions);
 
 	AppendLine(OutText, 0, FString::Printf(TEXT("material_nodes: count=%d"), Expressions.Num()));
 
 	FExportContext Context;
 	Context.Options = Options;
+	Context.SelectedExpressions = Selection.IsActive() ? &SelectedExpressions : nullptr;
 	CacheApproximateLayoutHints(Expressions, nullptr, Context);
 	for (UMaterialExpression* Expression : Expressions)
 	{
@@ -1864,8 +1928,23 @@ bool FUE2CodeMaterialExporter::ExportMaterialFunctionToString(UMaterialFunctionI
 		return false;
 	}
 
+	const UE2CodeSelection::FNodeSelection Selection(Options);
+	if (Selection.IsActive())
+	{
+		const TArray<UMaterialExpression*> FunctionExpressions = Expressions;
+		Expressions.Reset();
+		SelectExpressions(FunctionExpressions, Selection, Expressions);
+		if (Expressions.Num() == 0)
+		{
+			OutText.Reset();
+			OutError = UE2CodeSelection::NoMatchError(ObjectRef(MaterialFunction));
+			return false;
+		}
+	}
+
 	RemovePassthroughReroutes(Expressions);
 	SortExpressions(Expressions);
+	const TSet<const UMaterialExpression*> SelectedExpressions = ExpressionSet(Expressions);
 
 	OutText.Reset();
 	AppendLine(OutText, 0, TEXT("UE_NODE2CODE material_function_export version=3"));
@@ -1886,16 +1965,21 @@ bool FUE2CodeMaterialExporter::ExportMaterialFunctionToString(UMaterialFunctionI
 		AppendLine(OutText, 0, FString::Printf(TEXT("description: \"%s\""), *OneLine(Description)));
 	}
 	AppendExportOptions(Options, OutText, false);
+	if (Selection.IsActive())
+	{
+		AppendLine(OutText, 0, UE2CodeSelection::HeaderLine(Expressions.Num()));
+	}
 	AppendLine(OutText, 0, TEXT(""));
 	AppendMaterialFunctionInstanceOverrides(MaterialFunction, OutText, 0, true);
 
-	AppendFunctionOutputs(FunctionForExport, OutText, 0);
+	AppendFunctionOutputs(FunctionForExport, OutText, 0, Selection.IsActive() ? &SelectedExpressions : nullptr);
 	AppendLine(OutText, 0, TEXT(""));
 
 	AppendLine(OutText, 0, FString::Printf(TEXT("function_nodes: count=%d"), Expressions.Num()));
 
 	FExportContext Context;
 	Context.Options = Options;
+	Context.SelectedExpressions = Selection.IsActive() ? &SelectedExpressions : nullptr;
 	CacheApproximateLayoutHints(Expressions, FunctionForExport, Context);
 	for (UMaterialExpression* Expression : Expressions)
 	{
@@ -2236,6 +2320,32 @@ bool FUE2CodeMaterialCompactSemanticsTest::RunTest(const FString& Parameters)
 	);
 	TestTrue(TEXT("Rendering-critical material settings are retained"), Text.Contains(TEXT("material_settings: domain=")));
 	TestFalse(TEXT("Default output omits volatile timestamps"), Text.Contains(TEXT("exported_at_local:")));
+
+	UMaterial* SelectionMaterial = NewObject<UMaterial>();
+	UMaterialExpressionConstant* SelectionConstant = NewObject<UMaterialExpressionConstant>(SelectionMaterial);
+	UMaterialExpressionMultiply* SelectionMultiply = NewObject<UMaterialExpressionMultiply>(SelectionMaterial);
+	SelectionMultiply->A.Expression = SelectionConstant;
+#if ENGINE_MAJOR_VERSION >= 5
+	SelectionMaterial->GetExpressionCollection().AddExpression(SelectionConstant);
+	SelectionMaterial->GetExpressionCollection().AddExpression(SelectionMultiply);
+#else
+	SelectionMaterial->Expressions.Add(SelectionConstant);
+	SelectionMaterial->Expressions.Add(SelectionMultiply);
+#endif
+	SelectionMaterial->GetExpressionInputForProperty(MP_BaseColor)->Expression = SelectionMultiply;
+	FUE2CodeExportOptions SelectionOptions;
+	SelectionOptions.SelectedNodeIds.Add(SelectionMultiply->GetName());
+	Text.Reset();
+	Error.Reset();
+	TestTrue(TEXT("Selected material nodes export"), FUE2CodeMaterialExporter::ExportMaterialToString(SelectionMaterial, SelectionOptions, Text, Error));
+	TestTrue(TEXT("Material selection header is written"), Text.Contains(TEXT("selection: nodes=1")) && Text.Contains(TEXT("material_nodes: count=1")));
+	TestTrue(TEXT("Inputs from unselected material nodes are marked"), Text.Contains(TEXT(" unselected")));
+	TestTrue(TEXT("Outputs fed by the selection are kept"), Text.Contains(TEXT("- MP_BaseColor <- ")));
+	SelectionOptions.SelectedNodeIds = {SelectionConstant->GetName()};
+	TestTrue(TEXT("Selecting an upstream material node exports"), FUE2CodeMaterialExporter::ExportMaterialToString(SelectionMaterial, SelectionOptions, Text, Error));
+	TestFalse(TEXT("Outputs not fed by the selection are omitted"), Text.Contains(TEXT("- MP_BaseColor <- ")));
+	SelectionOptions.SelectedNodeIds = {TEXT("NoSuchNode")};
+	TestFalse(TEXT("An unmatched material selection fails"), FUE2CodeMaterialExporter::ExportMaterialToString(SelectionMaterial, SelectionOptions, Text, Error));
 
 #if ENGINE_MAJOR_VERSION >= 5
 	UMaterialExpressionNamedRerouteDeclaration* Declaration = NewObject<UMaterialExpressionNamedRerouteDeclaration>();

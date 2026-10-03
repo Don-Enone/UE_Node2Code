@@ -5,11 +5,13 @@
 #include "Engine/Selection.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "GraphEditor.h"
 #include "HAL/IConsoleManager.h"
 #include "IDesktopPlatform.h"
-#include "LevelEditor.h"
+#include "MaterialGraph/MaterialGraph.h"
+#include "MaterialGraph/MaterialGraphNode.h"
 #include "Materials/Material.h"
+#include "Materials/MaterialExpression.h"
 #include "Materials/MaterialFunctionInterface.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/MessageDialog.h"
@@ -20,6 +22,11 @@
 #include "UE2CodeNiagaraExporter.h"
 #include "UE2CodeBlueprintExporter.h"
 #include "Engine/Blueprint.h"
+#include "ToolMenus.h"
+#include "Toolkits/AssetEditorToolkit.h"
+#include "Toolkits/AssetEditorToolkitMenuContext.h"
+#include "Toolkits/IToolkitHost.h"
+#include "UObject/Package.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
@@ -78,6 +85,80 @@ namespace
 		}
 		return Material;
 	}
+
+	static FString DefaultOutputPath(const FString& AssetName, bool bSelection)
+	{
+		const FString FileName = AssetName + (bSelection ? TEXT(".selection.ue2code.txt") : TEXT(".ue2code.txt"));
+		return FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / TEXT("UE_Node2Code") / FileName);
+	}
+
+	static UObject* FindSupportedEditedAsset(const FAssetEditorToolkit& Toolkit)
+	{
+		// Editors list the asset first; later entries can be transient working copies.
+		const TArray<UObject*>* EditedObjects = Toolkit.GetObjectsCurrentlyBeingEdited();
+		for (UObject* Object : EditedObjects ? *EditedObjects : TArray<UObject*>())
+		{
+			if (Object && Object->GetOutermost() != GetTransientPackage()
+				&& (Object->IsA<UBlueprint>() || Object->IsA<UMaterialInterface>()
+					|| Object->IsA<UMaterialFunctionInterface>() || Object->IsA<UNiagaraScript>()))
+			{
+				return Object;
+			}
+		}
+		return nullptr;
+	}
+
+	static void CollectGraphEditorSelection(const TSharedRef<SWidget>& Widget, TSet<UObject*>& OutNodes)
+	{
+		static const FName GraphEditorType(TEXT("SGraphEditor"));
+		if (Widget->GetType() == GraphEditorType)
+		{
+			for (UObject* Node : StaticCastSharedRef<SGraphEditor>(Widget)->GetSelectedNodes())
+			{
+				OutNodes.Add(Node);
+			}
+			return;
+		}
+		FChildren* Children = Widget->GetChildren();
+		for (int32 Index = 0; Children && Index < Children->Num(); ++Index)
+		{
+			CollectGraphEditorSelection(Children->GetChildAt(Index), OutNodes);
+		}
+	}
+
+	// Ids understood by FUE2CodeExportOptions::SelectedNodeIds. Material editors edit a
+	// duplicate of the asset, so expressions are identified by their preserved object name.
+	static TArray<FString> CollectSelectedNodeIds(FAssetEditorToolkit& Toolkit)
+	{
+		TSet<UObject*> SelectedObjects;
+		CollectGraphEditorSelection(Toolkit.GetToolkitHost()->GetParentWidget(), SelectedObjects);
+		TArray<FString> Ids;
+		for (UObject* Object : SelectedObjects)
+		{
+			UEdGraphNode* Node = Cast<UEdGraphNode>(Object);
+			if (!Node)
+			{
+				continue;
+			}
+			if (Node->GetGraph() && Node->GetGraph()->IsA<UMaterialGraph>())
+			{
+				const UMaterialGraphNode* MaterialNode = Cast<UMaterialGraphNode>(Node);
+				if (MaterialNode && MaterialNode->MaterialExpression)
+				{
+					Ids.AddUnique(MaterialNode->MaterialExpression->GetName());
+				}
+			}
+			else
+			{
+				Ids.AddUnique(Node->NodeGuid.ToString());
+			}
+		}
+		Ids.Sort();
+		return Ids;
+	}
+
+	class SUE2CodeExportWidget;
+	static TWeakPtr<SUE2CodeExportWidget> GExportWidget;
 
 	class SUE2CodeExportWidget : public SCompoundWidget
 	{
@@ -235,6 +316,38 @@ namespace
 						.Padding(0, 8, 0, 0)
 						[
 							SNew(SBox)
+							.Visibility(this, &SUE2CodeExportWidget::GetSelectionVisibility)
+							[
+								SNew(SHorizontalBox)
+								+ SHorizontalBox::Slot()
+								.FillWidth(1.0f)
+								.VAlign(VAlign_Center)
+								[
+									SNew(SCheckBox)
+									.IsChecked(this, &SUE2CodeExportWidget::GetSelectedOnlyState)
+									.OnCheckStateChanged(this, &SUE2CodeExportWidget::OnSelectedOnlyChanged)
+									.ToolTipText(LOCTEXT("SelectedOnlyTip", "Export only the nodes selected in the asset editor. Graphs called by those nodes still follow Node Hierarchy Depth; links leaving the selection are marked 'unselected'."))
+									[
+										SNew(STextBlock).Text(this, &SUE2CodeExportWidget::GetSelectedOnlyLabel)
+									]
+								]
+								+ SHorizontalBox::Slot()
+								.AutoWidth()
+								.Padding(4, 0)
+								[
+									SNew(SButton)
+									.Text(LOCTEXT("RefreshSelection", "Refresh Selection"))
+									.ToolTipText(LOCTEXT("RefreshSelectionTip", "Read the current node selection again from the asset editor this window was opened from."))
+									.Visibility(this, &SUE2CodeExportWidget::GetRefreshSelectionVisibility)
+									.OnClicked(this, &SUE2CodeExportWidget::RefreshSelection)
+								]
+							]
+						]
+						+ SVerticalBox::Slot()
+						.AutoHeight()
+						.Padding(0, 8, 0, 0)
+						[
+							SNew(SBox)
 							.Visibility(this, &SUE2CodeExportWidget::GetUnreferencedVisibility)
 							[
 								MakeCheckBoxRow(LOCTEXT("ExportUnreferenced", "Export Unreferenced Material Nodes"), bExportUnreferenced)
@@ -275,6 +388,23 @@ namespace
 					]
 				]
 			];
+		}
+
+		// Called when the window is opened from an asset editor's Window menu.
+		void ApplyEditorContext(const TSharedPtr<FAssetEditorToolkit>& Toolkit)
+		{
+			SourceToolkit = Toolkit;
+			ClearSelection();
+			UObject* Asset = Toolkit.IsValid() ? FindSupportedEditedAsset(*Toolkit) : nullptr;
+			if (!Asset)
+			{
+				SetStatus(TEXT("The current editor does not edit a supported graph asset."));
+				return;
+			}
+			if (ApplyAsset(Asset))
+			{
+				ApplySelection(CollectSelectedNodeIds(*Toolkit));
+			}
 		}
 
 	private:
@@ -367,6 +497,9 @@ namespace
 
 		FReply UseSelectedAsset()
 		{
+			// A Content Browser asset replaces any node selection taken from an editor.
+			SourceToolkit.Reset();
+			ClearSelection();
 			if (!GEditor || !GEditor->GetSelectedObjects())
 			{
 				SetStatus(TEXT("No selected supported graph asset."));
@@ -377,60 +510,145 @@ namespace
 			GEditor->GetSelectedObjects()->GetSelectedObjects(SelectedObjects);
 			for (UObject* Object : SelectedObjects)
 			{
-				if (UBlueprint* Blueprint = Cast<UBlueprint>(Object))
+				if (Object && (Object->IsA<UBlueprint>() || Object->IsA<UNiagaraScript>()
+					|| Object->IsA<UMaterialInterface>() || Object->IsA<UMaterialFunctionInterface>()))
 				{
-					MaterialPathTextBox->SetText(FText::FromString(Blueprint->GetPathName()));
-					OutputPathTextBox->SetText(FText::FromString(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / FString::Printf(TEXT("UE_Node2Code/%s.ue2code.txt"), *Blueprint->GetName()))));
-					SetMode(EUE2CodeExportMode::Blueprint);
-					SetStatus(TEXT("Selected Blueprint applied."));
-					return FReply::Handled();
-				}
-
-				if (UNiagaraScript* NiagaraScript = Cast<UNiagaraScript>(Object))
-				{
-					if (NiagaraScript->IsFunctionScript())
-					{
-						SetMode(EUE2CodeExportMode::NiagaraFunctionScript);
-						SetStatus(TEXT("Selected Niagara Function Script applied."));
-					}
-					else if (NiagaraScript->IsModuleScript())
-					{
-						SetMode(EUE2CodeExportMode::NiagaraModuleScript);
-						SetStatus(TEXT("Selected Niagara Module Script applied."));
-					}
-					else
-					{
-						SetStatus(TEXT("Selected Niagara script is neither a Function Script nor a Module Script."));
-						return FReply::Handled();
-					}
-					MaterialPathTextBox->SetText(FText::FromString(NiagaraScript->GetPathName()));
-					const FString ShortName = NiagaraScript->GetName();
-					OutputPathTextBox->SetText(FText::FromString(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / FString::Printf(TEXT("UE_Node2Code/%s.ue2code.txt"), *ShortName))));
-					return FReply::Handled();
-				}
-
-				if (UMaterialInterface* Material = Cast<UMaterialInterface>(Object))
-				{
-					MaterialPathTextBox->SetText(FText::FromString(Material->GetPathName()));
-					const FString ShortName = Material->GetName();
-					OutputPathTextBox->SetText(FText::FromString(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / FString::Printf(TEXT("UE_Node2Code/%s.ue2code.txt"), *ShortName))));
-					SetMode(EUE2CodeExportMode::Material);
-					SetStatus(TEXT("Selected material applied."));
-					return FReply::Handled();
-				}
-
-				if (UMaterialFunctionInterface* MaterialFunction = Cast<UMaterialFunctionInterface>(Object))
-				{
-					MaterialPathTextBox->SetText(FText::FromString(MaterialFunction->GetPathName()));
-					const FString ShortName = MaterialFunction->GetName();
-					OutputPathTextBox->SetText(FText::FromString(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / FString::Printf(TEXT("UE_Node2Code/%s.ue2code.txt"), *ShortName))));
-					SetMode(EUE2CodeExportMode::MaterialFunction);
-					SetStatus(TEXT("Selected material function applied."));
+					ApplyAsset(Object);
 					return FReply::Handled();
 				}
 			}
 
 			SetStatus(TEXT("Selection does not contain a Blueprint, material, material function, Niagara Function Script, or Niagara Module Script."));
+			return FReply::Handled();
+		}
+
+		// Fills the asset path, default output file and export mode for a supported asset.
+		bool ApplyAsset(UObject* Object)
+		{
+			if (Cast<UBlueprint>(Object))
+			{
+				SetMode(EUE2CodeExportMode::Blueprint);
+				SetStatus(TEXT("Blueprint applied."));
+			}
+			else if (UNiagaraScript* NiagaraScript = Cast<UNiagaraScript>(Object))
+			{
+				if (NiagaraScript->IsFunctionScript())
+				{
+					SetMode(EUE2CodeExportMode::NiagaraFunctionScript);
+					SetStatus(TEXT("Niagara Function Script applied."));
+				}
+				else if (NiagaraScript->IsModuleScript())
+				{
+					SetMode(EUE2CodeExportMode::NiagaraModuleScript);
+					SetStatus(TEXT("Niagara Module Script applied."));
+				}
+				else
+				{
+					SetStatus(TEXT("Niagara script is neither a Function Script nor a Module Script."));
+					return false;
+				}
+			}
+			else if (Cast<UMaterialInterface>(Object))
+			{
+				SetMode(EUE2CodeExportMode::Material);
+				SetStatus(TEXT("Material applied."));
+			}
+			else if (Cast<UMaterialFunctionInterface>(Object))
+			{
+				SetMode(EUE2CodeExportMode::MaterialFunction);
+				SetStatus(TEXT("Material function applied."));
+			}
+			else
+			{
+				return false;
+			}
+			MaterialPathTextBox->SetText(FText::FromString(Object->GetPathName()));
+			AssetName = Object->GetName();
+			OutputPathTextBox->SetText(FText::FromString(DefaultOutputPath(AssetName, false)));
+			return true;
+		}
+
+		void ApplySelection(const TArray<FString>& NodeIds)
+		{
+			SelectedNodeIds = NodeIds;
+			SelectionAssetPath = MaterialPathTextBox->GetText().ToString().TrimStartAndEnd();
+			// A selection made in the editor is exported by default.
+			SetSelectedOnly(SelectedNodeIds.Num() > 0);
+			if (SelectedNodeIds.Num() > 0)
+			{
+				SetStatus(FString::Printf(TEXT("Current asset applied with %d selected node(s)."), SelectedNodeIds.Num()));
+			}
+		}
+
+		void ClearSelection()
+		{
+			SetSelectedOnly(false);
+			SelectedNodeIds.Reset();
+			SelectionAssetPath.Reset();
+		}
+
+		// Swaps between the full and selection output names unless the user picked a custom file.
+		void SetSelectedOnly(bool bValue)
+		{
+			if (bSelectedOnly != bValue && !AssetName.IsEmpty() && OutputPathTextBox.IsValid()
+				&& FPaths::IsSamePath(OutputPathTextBox->GetText().ToString(), DefaultOutputPath(AssetName, bSelectedOnly)))
+			{
+				OutputPathTextBox->SetText(FText::FromString(DefaultOutputPath(AssetName, bValue)));
+			}
+			bSelectedOnly = bValue;
+		}
+
+		bool SupportsSelection() const
+		{
+			return IsMode(EUE2CodeExportMode::Blueprint) || IsMode(EUE2CodeExportMode::Material)
+				|| IsMode(EUE2CodeExportMode::MaterialFunction) || IsNiagaraMode();
+		}
+
+		// The selection belongs to the asset it was read from; editing the path detaches it.
+		bool IsSelectionApplicable() const
+		{
+			return SelectedNodeIds.Num() > 0 && SupportsSelection()
+				&& MaterialPathTextBox->GetText().ToString().TrimStartAndEnd() == SelectionAssetPath;
+		}
+
+		EVisibility GetSelectionVisibility() const
+		{
+			return IsSelectionApplicable() ? EVisibility::Visible : EVisibility::Collapsed;
+		}
+
+		EVisibility GetRefreshSelectionVisibility() const
+		{
+			return SourceToolkit.IsValid() ? EVisibility::Visible : EVisibility::Collapsed;
+		}
+
+		ECheckBoxState GetSelectedOnlyState() const
+		{
+			return bSelectedOnly ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+		}
+
+		void OnSelectedOnlyChanged(ECheckBoxState NewState)
+		{
+			SetSelectedOnly(NewState == ECheckBoxState::Checked);
+		}
+
+		FText GetSelectedOnlyLabel() const
+		{
+			return FText::Format(LOCTEXT("SelectedOnlyLabel", "Export Selected Nodes Only ({0} selected)"), FText::AsNumber(SelectedNodeIds.Num()));
+		}
+
+		FReply RefreshSelection()
+		{
+			const TSharedPtr<FAssetEditorToolkit> Toolkit = SourceToolkit.Pin();
+			if (!Toolkit.IsValid())
+			{
+				SetStatus(TEXT("The source asset editor is closed."));
+				return FReply::Handled();
+			}
+			ApplySelection(CollectSelectedNodeIds(*Toolkit));
+			if (SelectedNodeIds.Num() == 0)
+			{
+				SetStatus(TEXT("No nodes are selected in the source asset editor."));
+			}
 			return FReply::Handled();
 		}
 
@@ -479,6 +697,11 @@ namespace
 			Options.bExportUnreferencedMaterialExpressions = bExportUnreferenced;
 			Options.bIncludeDebugMetadata = bIncludeDebugMetadata;
 			Options.bIncludeDefaultLikeProperties = bIncludeDefaultLikeProperties;
+			const bool bExportSelection = bSelectedOnly && IsSelectionApplicable();
+			if (bExportSelection)
+			{
+				Options.SelectedNodeIds = SelectedNodeIds;
+			}
 
 			FString Error;
 			bool bSuccess = false;
@@ -528,7 +751,9 @@ namespace
 
 			if (bSuccess)
 			{
-				SetStatus(FString::Printf(TEXT("Exported to %s"), *OutputPath));
+				SetStatus(bExportSelection
+					? FString::Printf(TEXT("Exported %d selected node(s) to %s"), SelectedNodeIds.Num(), *OutputPath)
+					: FString::Printf(TEXT("Exported to %s"), *OutputPath));
 			}
 			else
 			{
@@ -558,6 +783,11 @@ namespace
 		bool bExportUnreferenced = false;
 		bool bIncludeDebugMetadata = false;
 		bool bIncludeDefaultLikeProperties = false;
+		FString AssetName;
+		TArray<FString> SelectedNodeIds;
+		FString SelectionAssetPath;
+		bool bSelectedOnly = false;
+		TWeakPtr<FAssetEditorToolkit> SourceToolkit;
 	};
 }
 
@@ -587,15 +817,7 @@ void FUE2CodeModule::RegisterGui()
 	.SetDisplayName(LOCTEXT("UE_Node2CodeExportTab", "UE Node2Code"))
 	.SetMenuType(ETabSpawnerMenuType::Hidden);
 
-	FLevelEditorModule& LevelEditorModule = FModuleManager::LoadModuleChecked<FLevelEditorModule>(TEXT("LevelEditor"));
-	MenuExtender = MakeShareable(new FExtender());
-	MenuExtender->AddMenuExtension(
-		TEXT("WindowLayout"),
-		EExtensionHook::After,
-		nullptr,
-		FMenuExtensionDelegate::CreateRaw(this, &FUE2CodeModule::AddWindowMenuEntry)
-	);
-	LevelEditorModule.GetMenuExtensibilityManager()->AddExtender(MenuExtender);
+	UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FUE2CodeModule::RegisterMenus));
 }
 
 void FUE2CodeModule::UnregisterGui()
@@ -605,37 +827,53 @@ void FUE2CodeModule::UnregisterGui()
 		return;
 	}
 
-	if (MenuExtender.IsValid() && FModuleManager::Get().IsModuleLoaded(TEXT("LevelEditor")))
-	{
-		FLevelEditorModule& LevelEditorModule = FModuleManager::GetModuleChecked<FLevelEditorModule>(TEXT("LevelEditor"));
-		LevelEditorModule.GetMenuExtensibilityManager()->RemoveExtender(MenuExtender);
-		MenuExtender.Reset();
-	}
-
+	UToolMenus::UnRegisterStartupCallback(this);
+	UToolMenus::UnregisterOwner(this);
 	FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(UE_Node2CodeExportTabName);
 }
 
-void FUE2CodeModule::AddWindowMenuEntry(FMenuBuilder& MenuBuilder)
+void FUE2CodeModule::RegisterMenus()
 {
-	MenuBuilder.AddMenuEntry(
+	FToolMenuOwnerScoped OwnerScoped(this);
+	// Every editor's Window menu (level editor and all asset editors) inherits this menu.
+	UToolMenu* WindowMenu = UToolMenus::Get()->ExtendMenu(TEXT("MainFrame.MainMenu.Window"));
+	FToolMenuSection& Section = WindowMenu->AddSection(
+		TEXT("UE_Node2Code"),
+		LOCTEXT("UE_Node2CodeSection", "UE Node2Code"),
+		FToolMenuInsert(TEXT("WindowLayout"), EToolMenuInsertType::Before));
+	Section.AddMenuEntry(
+		TEXT("OpenUE_Node2Code"),
 		LOCTEXT("OpenUE_Node2Code", "UE Node2Code"),
-		LOCTEXT("OpenUE_Node2CodeTooltip", "Open the UE Node2Code material and material function export window."),
+		LOCTEXT("OpenUE_Node2CodeTooltip", "Open the UE Node2Code graph export window. From an asset editor, the edited asset and its selected nodes are used."),
 		FSlateIcon(),
-		FUIAction(FExecuteAction::CreateRaw(this, &FUE2CodeModule::OpenExportWindow))
+		FToolUIAction(FToolMenuExecuteAction::CreateRaw(this, &FUE2CodeModule::OpenExportWindow))
 	);
 }
 
-void FUE2CodeModule::OpenExportWindow()
+void FUE2CodeModule::OpenExportWindow(const FToolMenuContext& MenuContext)
 {
-	FGlobalTabmanager::Get()->TryInvokeTab(UE_Node2CodeExportTabName);
+	const UAssetEditorToolkitMenuContext* ToolkitContext = MenuContext.FindContext<UAssetEditorToolkitMenuContext>();
+	const TSharedPtr<FAssetEditorToolkit> Toolkit = ToolkitContext ? ToolkitContext->Toolkit.Pin() : nullptr;
+	const TSharedPtr<FTabManager> TabManager = Toolkit.IsValid() && Toolkit->GetTabManager().IsValid()
+		? Toolkit->GetTabManager()
+		: TSharedPtr<FTabManager>(FGlobalTabmanager::Get());
+	TabManager->TryInvokeTab(UE_Node2CodeExportTabName);
+
+	const TSharedPtr<SUE2CodeExportWidget> Widget = GExportWidget.Pin();
+	if (Toolkit.IsValid() && Widget.IsValid())
+	{
+		Widget->ApplyEditorContext(Toolkit);
+	}
 }
 
 TSharedRef<SDockTab> FUE2CodeModule::SpawnExportTab(const FSpawnTabArgs& SpawnTabArgs)
 {
+	TSharedRef<SUE2CodeExportWidget> Widget = SNew(SUE2CodeExportWidget);
+	GExportWidget = Widget;
 	return SNew(SDockTab)
 		.TabRole(ETabRole::NomadTab)
 		[
-			SNew(SUE2CodeExportWidget)
+			Widget
 		];
 }
 

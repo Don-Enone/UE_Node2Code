@@ -93,6 +93,61 @@ bool FUE2CodeBlueprintGraphTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUE2CodeBlueprintSelectionTest, "UE_Node2Code.Blueprint.SelectedNodes",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUE2CodeBlueprintSelectionTest::RunTest(const FString& Parameters)
+{
+	UBlueprint* Blueprint = NewObject<UBlueprint>();
+	Blueprint->ParentClass = UObject::StaticClass();
+	UEdGraph* Graph = NewObject<UEdGraph>(Blueprint, TEXT("EventGraph"));
+	Graph->Schema = UEdGraphSchema_K2::StaticClass();
+	Blueprint->UbergraphPages.Add(Graph);
+	UEdGraph* Other = NewObject<UEdGraph>(Blueprint, TEXT("OtherGraph"));
+	Other->Schema = UEdGraphSchema_K2::StaticClass();
+	Blueprint->FunctionGraphs.Add(Other);
+	UEdGraphNode* Source = NewObject<UEdGraphNode>(Graph, TEXT("Source"));
+	UEdGraphNode* Middle = NewObject<UEdGraphNode>(Graph, TEXT("Middle"));
+	UEdGraphNode* Sink = NewObject<UEdGraphNode>(Graph, TEXT("Sink"));
+	UEdGraphNode* Elsewhere = NewObject<UEdGraphNode>(Other, TEXT("Elsewhere"));
+	for (UEdGraphNode* Node : {Source, Middle, Sink})
+	{
+		Node->CreateNewGuid();
+		Graph->Nodes.Add(Node);
+	}
+	Elsewhere->CreateNewGuid();
+	Other->Nodes.Add(Elsewhere);
+	FEdGraphPinType ExecType;
+	ExecType.PinCategory = TEXT("exec");
+	Source->CreatePin(EGPD_Output, ExecType, TEXT("then"))->MakeLinkTo(Middle->CreatePin(EGPD_Input, ExecType, TEXT("execute")));
+	Middle->CreatePin(EGPD_Output, ExecType, TEXT("then"))->MakeLinkTo(Sink->CreatePin(EGPD_Input, ExecType, TEXT("execute")));
+	FBPVariableDescription Variable;
+	Variable.VarName = TEXT("UnusedBySelection");
+	Variable.VarType.PinCategory = TEXT("int");
+	Blueprint->NewVariables.Add(Variable);
+
+	FUE2CodeExportOptions Options;
+	Options.SelectedNodeIds.Add(Middle->NodeGuid.ToString());
+	FString Text, Error;
+	TestTrue(TEXT("Selected Blueprint nodes export"), FUE2CodeBlueprintExporter::ExportBlueprintToString(Blueprint, Options, Text, Error));
+	TestTrue(TEXT("Selection header is written"), Text.Contains(TEXT("selection: nodes=1")));
+	TestTrue(TEXT("Selected graph is marked"), Text.Contains(TEXT("scope=selection")));
+	TestFalse(TEXT("Only the selected node is exported"), Text.Contains(TEXT("node N1")));
+	TestFalse(TEXT("Graphs without selected nodes are omitted"), Text.Contains(TEXT("OtherGraph")));
+	TestTrue(TEXT("Incoming boundary link is marked"), Text.Contains(TEXT("unselected:")) && Text.Contains(TEXT("-> N0.P0")));
+	TestTrue(TEXT("Outgoing boundary link is marked"), Text.Contains(TEXT("N0.P1 -> unselected:")));
+	TestFalse(TEXT("Unreferenced variables are omitted"), Text.Contains(TEXT("UnusedBySelection")));
+
+	Options.SelectedNodeIds = {TEXT("Middle"), Elsewhere->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens)};
+	TestTrue(TEXT("Names and hyphenated GUIDs match"), FUE2CodeBlueprintExporter::ExportBlueprintToString(Blueprint, Options, Text, Error));
+	TestTrue(TEXT("Selections can span graphs"), Text.Contains(TEXT("selection: nodes=2")) && Text.Contains(TEXT("OtherGraph")));
+
+	Options.SelectedNodeIds = {TEXT("NoSuchNode")};
+	TestFalse(TEXT("An unmatched selection fails"), FUE2CodeBlueprintExporter::ExportBlueprintToString(Blueprint, Options, Text, Error));
+	TestTrue(TEXT("Unmatched selection explains the error"), Text.IsEmpty() && Error.Contains(TEXT("None of the selected nodes")));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUE2CodeBlueprintHierarchyTest, "UE_Node2Code.Blueprint.Hierarchy",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 

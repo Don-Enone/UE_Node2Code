@@ -41,6 +41,16 @@ The root is always layer 1. Material calls use `function_ref=FN...` into `functi
 
 `ref=external reason=depth_limit` or `function_ref: unavailable` means the implementation is not present. Do not infer it. `reason=recursive_call` points back to an existing definition and must not cause infinite traversal.
 
+### Selected-node exports
+
+When `selection: nodes=N` is present, the text is only part of the graph: it contains the N nodes the user selected in the editor (Blueprint graph lines also carry `scope=selection`). Graphs called by selected nodes are still expanded per `hierarchy_depth`. Links that leave the selection keep their far endpoint without exporting that node:
+
+- Blueprint: `unselected:"Node Title.Pin" -> N0.P1` or `N0.P2 -> unselected:"Node Title.Pin"`.
+- Niagara: `- unselected:"Node Title" "Pin" -> N001.P002 "A"`; `signature` still describes the whole script.
+- Material: `- [0] "A" <- ME_Mul_3[0] unselected`; `material_outputs` / `function_outputs` list only outputs fed directly by selected nodes.
+
+`unselected` means the value or execution comes from or goes to logic outside the selection. Do not guess its implementation, and do not assume nodes absent from the text do not exist.
+
 ## 3. Material Graphs
 
 ### Entry Points

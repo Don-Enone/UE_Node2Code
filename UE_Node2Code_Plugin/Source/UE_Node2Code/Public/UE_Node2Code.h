@@ -4,10 +4,9 @@
 #include "Modules/ModuleManager.h"
 
 class IConsoleObject;
-class FExtender;
-class FMenuBuilder;
 class SDockTab;
 class FSpawnTabArgs;
+struct FToolMenuContext;
 
 class FUE2CodeModule : public IModuleInterface
 {
@@ -20,8 +19,8 @@ private:
 	void UnregisterConsoleCommands();
 	void RegisterGui();
 	void UnregisterGui();
-	void AddWindowMenuEntry(FMenuBuilder& MenuBuilder);
-	void OpenExportWindow();
+	void RegisterMenus();
+	void OpenExportWindow(const FToolMenuContext& MenuContext);
 	TSharedRef<SDockTab> SpawnExportTab(const FSpawnTabArgs& SpawnTabArgs);
 
 	void ExportMaterialCommand(const TArray<FString>& Args);
@@ -33,5 +32,4 @@ private:
 	void ExportMaterialNodeCommand(const TArray<FString>& Args);
 
 	TArray<IConsoleObject*> ConsoleCommands;
-	TSharedPtr<FExtender> MenuExtender;
 };

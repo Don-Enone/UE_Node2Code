@@ -30,6 +30,9 @@ struct UE_NODE2CODE_API FUE2CodeExportOptions
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UE Node2Code")
 	bool bIncludeDefaultLikeProperties = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UE Node2Code", meta = (DisplayName = "Selected Node Ids", ToolTip = "When not empty, Blueprint, Material, Material Function and Niagara Script exports keep only these root-graph nodes. Each entry matches a node GUID, object name or object path. Graphs called by selected nodes still follow NodeHierarchyDepth."))
+	TArray<FString> SelectedNodeIds;
 };
 
 class UE_NODE2CODE_API FUE2CodeMaterialExporter

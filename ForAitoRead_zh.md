@@ -41,6 +41,16 @@ UE_NODE2CODE blueprint_export version=2
 
 `ref=external reason=depth_limit` 或 `function_ref: unavailable` 表示实现未展开。不要猜测外部实现。`reason=recursive_call` 表示检测到循环引用，应跳到已有定义，不要无限递归。
 
+### 仅导出选中节点
+
+出现 `selection: nodes=N` 时，文本只是图的一部分：只包含用户在编辑器中选中的 N 个节点（蓝图图行另标 `scope=selection`）。选中节点调用的图仍按 `hierarchy_depth` 完整展开。连到选区之外的连线会保留端点信息但不展开对方节点：
+
+- 蓝图：`unselected:"节点标题.引脚" -> N0.P1` 或 `N0.P2 -> unselected:"节点标题.引脚"`。
+- Niagara：`- unselected:"节点标题" "引脚" -> N001.P002 "A"`；`signature` 仍描述整个脚本。
+- 材质：`- [0] "A" <- ME_Mul_3[0] unselected`；`material_outputs` / `function_outputs` 只列出由选中节点直接驱动的输出。
+
+`unselected` 表示该值或执行流来自/去往选区外的未知逻辑，不要猜测其实现；未出现在文本中的节点不代表不存在。
+
 ## 3. 材质图
 
 ### 阅读入口

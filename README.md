@@ -98,6 +98,17 @@ UE_Node2Code/
 Window > UE Node2Code
 ```
 
+该菜单项出现在主编辑器以及蓝图、材质、材质函数、Niagara 脚本等资产编辑器的 `Window` 菜单中。从资产编辑器打开时，会自动填入当前编辑的资产、导出模式和输出路径；若图中有选中节点，则默认勾选 `Export Selected Nodes Only`，只导出选中节点（输出文件名为 `<资产名>.selection.ue2code.txt`）。取消勾选即导出整个资产。修改选择后点击 `Refresh Selection` 重新读取。
+
+仅导出选中节点（0.8）对蓝图、材质、材质函数和 Niagara Function/Module Script 行为一致：
+
+- 只输出选中节点；选中节点调用的图仍按 `Node Hierarchy Depth` 展开。
+- 连到选区外的连线保留，并以 `unselected` 标记另一端，不展开未选节点。
+- 文本头部写入 `selection: nodes=N`；蓝图只声明选中节点用到的变量，材质只列出由选中节点直接驱动的输出，Niagara 保留完整签名。
+- 材质与 Niagara 编辑器编辑的是副本，导出读取的是已应用/已保存的资产；新建但未应用的节点无法匹配。全部未匹配时导出失败并提示。
+
+C++/蓝图/Python 调用者可设置 `FUE2CodeExportOptions::SelectedNodeIds`（节点 GUID、对象名或对象路径）获得相同结果；材质属性链与单节点模式忽略此选项。
+
 窗口选项：
 
 | 选项 | 说明 |
@@ -109,6 +120,8 @@ Window > UE Node2Code
 | `Material Property` | 属性模式下使用，例如 `MP_BaseColor` |
 | `Node Name` | 节点模式下使用，例如 `MaterialExpressionMultiply_3` |
 | `Node Hierarchy Depth` | 通用于全部图类型；控制 Material Function 和 Niagara 调用图的递归展开层级 |
+| `Export Selected Nodes Only` | 从资产编辑器打开且有选中节点时出现并默认勾选；只导出选中节点 |
+| `Refresh Selection` | 重新读取来源资产编辑器中的当前节点选择 |
 | `Export Unreferenced Material Nodes` | 是否包含未被材质输出引用的节点；默认关闭以避免无效文本 |
 | `Include Debug Metadata` | 输出对象路径、节点 GUID、时间戳和节点位置等额外调试信息 |
 | `Include Default-Like Properties` | 输出通常被过滤的普通默认/空属性；已连接输入对应的无效回退值仍会剔除，不影响 Niagara 引脚默认值 |
@@ -369,6 +382,17 @@ Open the editor window from:
 Window > UE Node2Code
 ```
 
+The entry appears in the Window menu of the main editor and of every asset editor (Blueprint, Material, Material Function, Niagara Script, ...). Opened from an asset editor, the window fills in the edited asset, export mode and output path. If nodes are selected in the graph, `Export Selected Nodes Only` is checked by default and only those nodes are exported (to `<Asset>.selection.ue2code.txt`); uncheck it to export the whole asset. Use `Refresh Selection` after changing the selection.
+
+Selected-node export (0.8) behaves the same for Blueprint, Material, Material Function and Niagara Function/Module Scripts:
+
+- Only selected nodes are written; graphs they call still expand per `Node Hierarchy Depth`.
+- Links leaving the selection are kept, with the far endpoint marked `unselected` instead of exported.
+- The header contains `selection: nodes=N`. Blueprints declare only variables used by the exported nodes, materials list only outputs fed by selected nodes, and Niagara keeps the full script signature.
+- Material and Niagara editors edit a working copy, while export reads the applied/saved asset; nodes added but not yet applied cannot be matched. If nothing matches, export fails with an explanation.
+
+C++/Blueprint/Python callers get the same result by setting `FUE2CodeExportOptions::SelectedNodeIds` (node GUIDs, object names or object paths). Material property-chain and single-node modes ignore it.
+
 Window options:
 
 | Option | Description |
@@ -380,6 +404,8 @@ Window options:
 | `Material Property` | Used in property mode, for example `MP_BaseColor` |
 | `Node Name` | Used in node mode, for example `MaterialExpressionMultiply_3` |
 | `Node Hierarchy Depth` | Applies to every graph type; controls Material Function and Niagara called-graph expansion |
+| `Export Selected Nodes Only` | Shown and checked by default when opened from an asset editor with selected nodes; exports only those nodes |
+| `Refresh Selection` | Re-read the current node selection from the source asset editor |
 | `Export Unreferenced Material Nodes` | Include nodes not referenced by material outputs; off by default to avoid irrelevant text |
 | `Include Debug Metadata` | Include object paths, node GUIDs, timestamps, positions, and other debug metadata |
 | `Include Default-Like Properties` | Include ordinary default or empty properties that are usually filtered; ineffective fallbacks for connected inputs remain omitted, and Niagara pin defaults are unaffected |

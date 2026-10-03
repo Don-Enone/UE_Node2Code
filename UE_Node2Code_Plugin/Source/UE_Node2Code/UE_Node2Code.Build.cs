@@ -22,11 +22,11 @@ public class UE_Node2Code : ModuleRules
 				"BlueprintGraph",
 				"DesktopPlatform",
 				"InputCore",
-				"LevelEditor",
 				"NiagaraEditor",
 				"Projects",
 				"Slate",
 				"SlateCore",
+				"ToolMenus",
 				"UnrealEd"
 			}
 		);

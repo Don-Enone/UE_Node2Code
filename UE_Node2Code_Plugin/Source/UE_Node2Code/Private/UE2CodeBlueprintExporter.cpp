@@ -3,6 +3,7 @@
 #include "UE2CodeEngineCompat.h"
 #include "UE2CodeTextFormat.h"
 #include "UE2CodeBlueprintTextFormat.h"
+#include "UE2CodeSelection.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
@@ -102,6 +103,8 @@ namespace UE2CodeBlueprintExporterPrivate
 		UEdGraph* Graph = nullptr;
 		int32 Layer = 1;
 		bool bRoot = false;
+		// Only selected nodes of this graph are exported.
+		bool bSelection = false;
 	};
 
 	struct FContext
@@ -110,7 +113,8 @@ namespace UE2CodeBlueprintExporterPrivate
 		TArray<FGraphEntry> Graphs;
 		TMap<UEdGraph*, int32> GraphIds;
 		int32 MaxLayer = 32;
-		void Add(UEdGraph* Graph, int32 Layer, bool bRoot)
+		const UE2CodeSelection::FNodeSelection* Selection = nullptr;
+		void Add(UEdGraph* Graph, int32 Layer, bool bRoot, bool bSelection = false)
 		{
 			if (Graph && !GraphIds.Contains(Graph))
 			{
@@ -119,6 +123,7 @@ namespace UE2CodeBlueprintExporterPrivate
 				Entry.Graph = Graph;
 				Entry.Layer = Layer;
 				Entry.bRoot = bRoot;
+				Entry.bSelection = bSelection;
 				Graphs.Add(Entry);
 			}
 		}
@@ -224,6 +229,49 @@ namespace UE2CodeBlueprintExporterPrivate
 		return UE2CodeBlueprintTextFormat::FieldName(Name);
 	}
 
+	static TArray<UEdGraphNode*> ExportedNodes(const FGraphEntry& Entry, const FContext& Context)
+	{
+		TArray<UEdGraphNode*> Nodes = SortedNodes(Entry.Graph);
+		if (Entry.bSelection && Context.Selection)
+		{
+			Nodes.RemoveAll([&Context](UEdGraphNode* Node) { return !Context.Selection->Contains(Node, Node->NodeGuid); });
+		}
+		if (!Context.Format.bDebug)
+		{
+			Nodes.RemoveAll([](UEdGraphNode* Node)
+			{
+				UK2Node_Knot* Knot = Cast<UK2Node_Knot>(Node);
+				return Knot && Knot->Pins.Num() == 2 && Knot->Pins[1] && SourceThroughReroutes(Knot->GetOutputPin()) != Knot->GetOutputPin();
+			});
+		}
+		return Nodes;
+	}
+
+	// Endpoint of a link that leaves the exported selection.
+	static FString Unselected(UEdGraphPin* Pin, bool bDebug)
+	{
+		return TEXT("unselected:") + Quote(Pin->GetOwningNode()->GetNodeTitle(ENodeTitleType::ListView).ToString() + TEXT(".") + PinName(Pin, bDebug));
+	}
+
+	// Follow inlined or unselected reroutes forward to the real input pins.
+	static void DownstreamPins(UEdGraphPin* Output, const TMap<UEdGraphPin*, FString>& PinIds, bool bDebug, TSet<UEdGraphPin*>& Seen, TArray<UEdGraphPin*>& OutPins)
+	{
+		for (UEdGraphPin* Linked : Output->LinkedTo)
+		{
+			if (!Linked || Seen.Contains(Linked)) { continue; }
+			Seen.Add(Linked);
+			UK2Node_Knot* Knot = Cast<UK2Node_Knot>(Linked->GetOwningNode());
+			if (!bDebug && Knot && !PinIds.Contains(Linked) && Knot->Pins.Num() == 2 && Knot->GetOutputPin())
+			{
+				DownstreamPins(Knot->GetOutputPin(), PinIds, bDebug, Seen, OutPins);
+			}
+			else
+			{
+				OutPins.Add(Linked);
+			}
+		}
+	}
+
 	static void ExportGraph(const FGraphEntry& Entry, FContext& Context, const FUE2CodeExportOptions& Options, FString& Text)
 	{
 		FFormatter& Format = Context.Format;
@@ -232,16 +280,9 @@ namespace UE2CodeBlueprintExporterPrivate
 		Line(Text, 1, TEXT("graph ") + Context.Ref(Graph) + TEXT(" name=") + Quote(Graph->GetName())
 			+ TEXT(" owner=") + Quote(Format.Path(OwnerBlueprint(Graph) ? OwnerBlueprint(Graph)->GetPathName() : Graph->GetPathName()))
 			+ (Format.bDebug || !Schema || Schema->GetClass()->GetFName() != TEXT("EdGraphSchema_K2") ? TEXT(" schema=") + Quote(Schema ? Schema->GetClass()->GetName() : TEXT("None")) : TEXT(""))
-			+ FString::Printf(TEXT(" layer=%d root=%s"), Entry.Layer, Entry.bRoot ? TEXT("true") : TEXT("false")));
-		TArray<UEdGraphNode*> Nodes = SortedNodes(Graph);
-		if (!Format.bDebug)
-		{
-			Nodes.RemoveAll([](UEdGraphNode* Node)
-			{
-				UK2Node_Knot* Knot = Cast<UK2Node_Knot>(Node);
-				return Knot && Knot->Pins.Num() == 2 && Knot->Pins[1] && SourceThroughReroutes(Knot->GetOutputPin()) != Knot->GetOutputPin();
-			});
-		}
+			+ FString::Printf(TEXT(" layer=%d root=%s"), Entry.Layer, Entry.bRoot ? TEXT("true") : TEXT("false"))
+			+ (Entry.bSelection ? TEXT(" scope=selection") : TEXT("")));
+		const TArray<UEdGraphNode*> Nodes = ExportedNodes(Entry, Context);
 		TMap<UEdGraphNode*, FString> NodeIds;
 		TMap<UEdGraphPin*, FString> PinIds;
 		for (int32 Index = 0; Index < Nodes.Num(); ++Index)
@@ -343,8 +384,28 @@ namespace UE2CodeBlueprintExporterPrivate
 					if (!Linked) { continue; }
 					UEdGraphPin* Source = Format.bDebug ? Linked : SourceThroughReroutes(Linked);
 					const FString* SourceId = PinIds.Find(Source);
-					Links.Add((SourceId ? *SourceId : TEXT("external:") + Quote(Source->GetOwningNode()->GetPathName() + TEXT(".") + Source->PinName.ToString()))
-						+ TEXT(" -> ") + PinIds.FindChecked(Pin));
+					FString SourceText;
+					if (SourceId) { SourceText = *SourceId; }
+					else if (Entry.bSelection && Source->GetOwningNode()->GetGraph() == Graph) { SourceText = Unselected(Source, Format.bDebug); }
+					else { SourceText = TEXT("external:") + Quote(Source->GetOwningNode()->GetPathName() + TEXT(".") + Source->PinName.ToString()); }
+					Links.Add(SourceText + TEXT(" -> ") + PinIds.FindChecked(Pin));
+				}
+			}
+		}
+		if (Entry.bSelection)
+		{
+			for (UEdGraphNode* Node : Nodes)
+			{
+				for (UEdGraphPin* Pin : Node->Pins)
+				{
+					if (!Pin || Pin->Direction != EGPD_Output || !PinIds.Contains(Pin)) { continue; }
+					TSet<UEdGraphPin*> Seen;
+					TArray<UEdGraphPin*> Targets;
+					DownstreamPins(Pin, PinIds, Format.bDebug, Seen, Targets);
+					for (UEdGraphPin* Target : Targets)
+					{
+						if (!PinIds.Contains(Target)) { Links.Add(PinIds.FindChecked(Pin) + TEXT(" -> ") + Unselected(Target, Format.bDebug)); }
+					}
 				}
 			}
 		}
@@ -364,31 +425,63 @@ bool FUE2CodeBlueprintExporter::ExportBlueprintToString(UBlueprint* Blueprint, c
 	Context.Format.bDebug = Options.bIncludeDebugMetadata;
 	FFormatter& Format = Context.Format;
 	Context.MaxLayer = Options.NodeHierarchyDepth > 0 ? Options.NodeHierarchyDepth : FMath::Max(1, Options.MaxFunctionDepth);
+	const UE2CodeSelection::FNodeSelection Selection(Options);
+	Context.Selection = &Selection;
 	TArray<UEdGraph*> Graphs;
 	Blueprint->GetAllGraphs(Graphs);
 	Graphs.RemoveAll([](UEdGraph* Graph) { return !Graph; });
 	Graphs.Sort([](const UEdGraph& A, const UEdGraph& B) { return A.GetPathName() < B.GetPathName(); });
 	for (UEdGraph* Graph : Graphs)
 	{
-		if (Graph->GetOuter() == Blueprint) { Context.Add(Graph, 1, true); }
+		if (!Selection.IsActive())
+		{
+			if (Graph->GetOuter() == Blueprint) { Context.Add(Graph, 1, true); }
+		}
+		// Selected nodes may live in any graph of the asset, including collapsed graphs.
+		else if (Graph->Nodes.ContainsByPredicate([&Selection](UEdGraphNode* Node) { return Node && Selection.Contains(Node, Node->NodeGuid); }))
+		{
+			Context.Add(Graph, 1, true, true);
+		}
+	}
+	if (Selection.IsActive() && Context.Graphs.Num() == 0)
+	{
+		OutError = UE2CodeSelection::NoMatchError(Blueprint->GetName());
+		return false;
 	}
 	// Breadth-first collection assigns shared definitions their shortest call depth.
 	for (int32 Index = 0; Index < Context.Graphs.Num(); ++Index)
 	{
 		const FGraphEntry Entry = Context.Graphs[Index];
 		if (Entry.Layer >= Context.MaxLayer) { continue; }
-		for (UEdGraphNode* Node : SortedNodes(Entry.Graph)) { Context.Add(CalledGraph(Node), Entry.Layer + 1, false); }
+		for (UEdGraphNode* Node : Entry.bSelection ? ExportedNodes(Entry, Context) : SortedNodes(Entry.Graph)) { Context.Add(CalledGraph(Node), Entry.Layer + 1, false); }
+		if (Entry.bSelection) { continue; }
 		for (UEdGraph* SubGraph : Entry.Graph->SubGraphs) { Context.Add(SubGraph, Entry.Layer + 1, false); }
+	}
+	// A selection export only declares the variables its exported nodes use.
+	TSet<FName> UsedVariables;
+	int32 SelectedNodeCount = 0;
+	if (Selection.IsActive())
+	{
+		for (const FGraphEntry& Entry : Context.Graphs)
+		{
+			for (UEdGraphNode* Node : ExportedNodes(Entry, Context))
+			{
+				if (Entry.bSelection) { ++SelectedNodeCount; }
+				if (UK2Node_Variable* Variable = Cast<UK2Node_Variable>(Node)) { UsedVariables.Add(Variable->VariableReference.GetMemberName()); }
+			}
+		}
 	}
 	Line(OutText, 0, TEXT("UE_NODE2CODE blueprint_export version=2"));
 	Line(OutText, 0, TEXT("type_aliases: K2_=K2Node_"));
 	Line(OutText, 0, TEXT("asset: ") + Quote(Format.Path(Blueprint->GetPathName())));
 	Line(OutText, 0, TEXT("parent_class: ") + Quote(Blueprint->ParentClass ? Format.Path(Blueprint->ParentClass->GetPathName()) : TEXT("None")));
 	Line(OutText, 0, FString::Printf(TEXT("hierarchy_depth: %d"), FMath::Max(0, Options.NodeHierarchyDepth)));
+	if (Selection.IsActive()) { Line(OutText, 0, UE2CodeSelection::HeaderLine(SelectedNodeCount)); }
 	Line(OutText, 0, TEXT("variables:"));
 	UObject* Defaults = Blueprint->GeneratedClass ? Blueprint->GeneratedClass->GetDefaultObject(false) : nullptr;
 	for (const FBPVariableDescription& Variable : Blueprint->NewVariables)
 	{
+		if (Selection.IsActive() && !UsedVariables.Contains(Variable.VarName)) { continue; }
 		FString Default = Variable.DefaultValue;
 		const FProperty* DefaultProperty = nullptr;
 		if (Defaults)

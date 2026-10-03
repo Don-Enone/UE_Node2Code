@@ -18,6 +18,7 @@
 #include "NiagaraScriptSource.h"
 #include "Runtime/Launch/Resources/Version.h"
 #include "UE2CodeEngineCompat.h"
+#include "UE2CodeSelection.h"
 #include "UE2CodeTextFormat.h"
 #include "UObject/UnrealType.h"
 
@@ -257,7 +258,8 @@ namespace UE2CodeNiagaraExporterPrivate
 		return Source ? Source->NodeGraph : nullptr;
 	}
 
-	static void GetSortedNodes(UNiagaraGraph* Graph, TArray<UEdGraphNode*>& OutNodes)
+	// A selection, when given, keeps only the selected nodes of this graph.
+	static void GetSortedNodes(UNiagaraGraph* Graph, TArray<UEdGraphNode*>& OutNodes, const UE2CodeSelection::FNodeSelection* Selection = nullptr)
 	{
 		OutNodes.Reset();
 		if (!Graph)
@@ -266,7 +268,7 @@ namespace UE2CodeNiagaraExporterPrivate
 		}
 		for (UEdGraphNode* Node : Graph->Nodes)
 		{
-			if (Node)
+			if (Node && (!Selection || Selection->Contains(Node, Node->NodeGuid)))
 			{
 				OutNodes.Add(Node);
 			}
@@ -302,11 +304,11 @@ namespace UE2CodeNiagaraExporterPrivate
 		int32 NextScriptId = 1;
 	};
 
-	static void RegisterCalledScripts(UNiagaraScript* Script, FNiagaraExportContext& Context)
+	static void RegisterCalledScripts(UNiagaraScript* Script, FNiagaraExportContext& Context, const UE2CodeSelection::FNodeSelection* Selection = nullptr)
 	{
 		UNiagaraGraph* Graph = GetScriptGraph(Script);
 		TArray<UEdGraphNode*> Nodes;
-		GetSortedNodes(Graph, Nodes);
+		GetSortedNodes(Graph, Nodes, Selection);
 
 		for (UEdGraphNode* Node : Nodes)
 		{
@@ -602,7 +604,15 @@ namespace UE2CodeNiagaraExporterPrivate
 		TMap<const UEdGraphNode*, FString> NodeIds;
 		TMap<const UEdGraphPin*, FString> PinIds;
 		TArray<FConnection> Connections;
+		// Selection exports also list links that cross the selection boundary.
+		bool bSelection = false;
 	};
+
+	// An endpoint outside the exported selection has a node title and no pin ID.
+	static FString UnselectedNode(const UEdGraphNode* Node)
+	{
+		return TEXT("unselected:") + Quote(Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
+	}
 
 	static void GatherConnections(const FGraphExportData& Data, TArray<FConnection>& OutConnections)
 	{
@@ -610,15 +620,50 @@ namespace UE2CodeNiagaraExporterPrivate
 		{
 			for (const UEdGraphPin* Pin : Node->Pins)
 			{
-				if (!Pin || IsAddPin(Pin) || Pin->Direction != EGPD_Output)
+				if (!Pin || IsAddPin(Pin))
 				{
+					continue;
+				}
+				if (Pin->Direction == EGPD_Input)
+				{
+					if (!Data.bSelection || !Data.PinIds.Contains(Pin))
+					{
+						continue;
+					}
+					for (const UEdGraphPin* LinkedPin : Pin->LinkedTo)
+					{
+						const UEdGraphNode* LinkedNode = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
+						if (!LinkedNode || Data.NodeIds.Contains(LinkedNode))
+						{
+							continue;
+						}
+						FConnection& Connection = OutConnections.AddDefaulted_GetRef();
+						Connection.FromNode = UnselectedNode(LinkedNode);
+						Connection.FromPin = PinInternalName(LinkedPin);
+						Connection.ToNode = Data.NodeIds.FindChecked(Node);
+						Connection.ToPin = PinInternalName(Pin);
+						Connection.ToPinId = Data.PinIds.FindChecked(Pin);
+					}
 					continue;
 				}
 				for (const UEdGraphPin* LinkedPin : Pin->LinkedTo)
 				{
 					const UEdGraphNode* LinkedNode = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
-					if (!LinkedPin || LinkedPin->Direction != EGPD_Input || !Data.NodeIds.Contains(LinkedNode))
+					if (!LinkedPin || LinkedPin->Direction != EGPD_Input)
 					{
+						continue;
+					}
+					if (!Data.NodeIds.Contains(LinkedNode))
+					{
+						if (Data.bSelection && LinkedNode && Data.PinIds.Contains(Pin))
+						{
+							FConnection& Connection = OutConnections.AddDefaulted_GetRef();
+							Connection.FromNode = Data.NodeIds.FindChecked(Node);
+							Connection.FromPin = PinInternalName(Pin);
+							Connection.FromPinId = Data.PinIds.FindChecked(Pin);
+							Connection.ToNode = UnselectedNode(LinkedNode);
+							Connection.ToPin = PinInternalName(LinkedPin);
+						}
 						continue;
 					}
 					const FString* FromPinId = Data.PinIds.Find(Pin);
@@ -647,9 +692,10 @@ namespace UE2CodeNiagaraExporterPrivate
 		});
 	}
 
-	static void BuildGraphExportData(UNiagaraGraph* Graph, FGraphExportData& OutData)
+	static void BuildGraphExportData(UNiagaraGraph* Graph, FGraphExportData& OutData, const UE2CodeSelection::FNodeSelection* Selection = nullptr)
 	{
-		GetSortedNodes(Graph, OutData.Nodes);
+		GetSortedNodes(Graph, OutData.Nodes, Selection);
+		OutData.bSelection = Selection != nullptr;
 		for (int32 NodeIndex = 0; NodeIndex < OutData.Nodes.Num(); ++NodeIndex)
 		{
 			const UEdGraphNode* Node = OutData.Nodes[NodeIndex];
@@ -859,11 +905,15 @@ namespace UE2CodeNiagaraExporterPrivate
 		UNiagaraGraph* Graph,
 		FString& OutText,
 		int32 Depth,
-		FNiagaraExportContext& Context)
+		FNiagaraExportContext& Context,
+		const UE2CodeSelection::FNodeSelection* Selection = nullptr)
 	{
 		FGraphExportData Data;
-		BuildGraphExportData(Graph, Data);
-		AppendScriptSignature(Data.Nodes, Script->GetUsage(), OutText, Depth);
+		BuildGraphExportData(Graph, Data, Selection);
+		// The signature always describes the whole script, even for a selection.
+		TArray<UEdGraphNode*> AllNodes;
+		GetSortedNodes(Graph, AllNodes);
+		AppendScriptSignature(AllNodes, Script->GetUsage(), OutText, Depth);
 		AppendLine(OutText, Depth, FString::Printf(TEXT("nodes: count=%d"), Data.Nodes.Num()));
 		for (const UEdGraphNode* Node : Data.Nodes)
 		{
@@ -873,17 +923,17 @@ namespace UE2CodeNiagaraExporterPrivate
 		AppendLine(OutText, Depth, Data.Connections.Num() > 0 ? FString::Printf(TEXT("connections: count=%d"), Data.Connections.Num()) : TEXT("connections: none"));
 		for (const FConnection& Connection : Data.Connections)
 		{
+			const auto Endpoint = [](const FString& Node, const FString& PinId, const FString& Pin)
+			{
+				return (PinId.IsEmpty() ? Node : Node + TEXT(".") + PinId) + TEXT(" ") + Quote(Pin);
+			};
 			AppendLine(
 				OutText,
 				Depth + 1,
 				FString::Printf(
-					TEXT("- %s.%s %s -> %s.%s %s"),
-					*Connection.FromNode,
-					*Connection.FromPinId,
-					*Quote(Connection.FromPin),
-					*Connection.ToNode,
-					*Connection.ToPinId,
-					*Quote(Connection.ToPin)));
+					TEXT("- %s -> %s"),
+					*Endpoint(Connection.FromNode, Connection.FromPinId, Connection.FromPin),
+					*Endpoint(Connection.ToNode, Connection.ToPinId, Connection.ToPin)));
 		}
 	}
 
@@ -917,8 +967,24 @@ namespace UE2CodeNiagaraExporterPrivate
 			return false;
 		}
 
+		const UE2CodeSelection::FNodeSelection Selection(Options);
+		const UE2CodeSelection::FNodeSelection* RootSelection = Selection.IsActive() ? &Selection : nullptr;
+		int32 SelectedNodeCount = 0;
+		if (RootSelection)
+		{
+			TArray<UEdGraphNode*> SelectedNodes;
+			GetSortedNodes(Graph, SelectedNodes, RootSelection);
+			SelectedNodeCount = SelectedNodes.Num();
+			if (SelectedNodeCount == 0)
+			{
+				OutText.Reset();
+				OutError = UE2CodeSelection::NoMatchError(Script->GetName());
+				return false;
+			}
+		}
+
 		FNiagaraExportContext Context(Options, Script);
-		RegisterCalledScripts(Script, Context);
+		RegisterCalledScripts(Script, Context, RootSelection);
 
 		const FString KindToken = ScriptKindToken(ExpectedUsage);
 		OutText.Reset();
@@ -940,10 +1006,14 @@ namespace UE2CodeNiagaraExporterPrivate
 				TEXT("options: debug=%s default_properties=%s"),
 				Options.bIncludeDebugMetadata ? TEXT("true") : TEXT("false"),
 				Options.bIncludeDefaultLikeProperties ? TEXT("true") : TEXT("false")));
+		if (RootSelection)
+		{
+			AppendLine(OutText, 1, UE2CodeSelection::HeaderLine(SelectedNodeCount));
+		}
 
 		AppendLine(OutText, 0, TEXT(""));
 		AppendLine(OutText, 0, TEXT("root_graph:"));
-		AppendGraphContent(Script, Graph, OutText, 1, Context);
+		AppendGraphContent(Script, Graph, OutText, 1, Context, RootSelection);
 
 		AppendLine(OutText, 0, TEXT(""));
 		AppendLine(
@@ -1077,6 +1147,32 @@ bool FUE2CodeNiagaraScriptExportTest::RunTest(const FString& Parameters)
 	Error.Reset();
 	TestTrue(TEXT("Hierarchy depth 2 exports direct Niagara calls"), FUE2CodeNiagaraExporter::ExportNiagaraFunctionScriptToString(FunctionScript, DirectCallOptions, DirectCallText, Error));
 	TestTrue(TEXT("Hierarchy depth 2 emits direct called graph definitions"), DirectCallText.Contains(TEXT("ref=NS")) && DirectCallText.Contains(TEXT("called_graphs: count=")));
+
+	TArray<UEdGraphNode*> RootNodes;
+	UE2CodeNiagaraExporterPrivate::GetSortedNodes(UE2CodeNiagaraExporterPrivate::GetScriptGraph(FunctionScript), RootNodes);
+	const UEdGraphNode* LinkedNode = nullptr;
+	for (const UEdGraphNode* Node : RootNodes)
+	{
+		if (Node->Pins.ContainsByPredicate([](const UEdGraphPin* Pin) { return Pin && Pin->LinkedTo.Num() > 0; }))
+		{
+			LinkedNode = Node;
+			break;
+		}
+	}
+	if (TestNotNull(TEXT("RandomBool has a linked node to select"), LinkedNode))
+	{
+		FUE2CodeExportOptions SelectionOptions;
+		SelectionOptions.SelectedNodeIds.Add(LinkedNode->NodeGuid.ToString());
+		FString SelectionText;
+		Error.Reset();
+		TestTrue(TEXT("Selected Niagara nodes export"), FUE2CodeNiagaraExporter::ExportNiagaraFunctionScriptToString(FunctionScript, SelectionOptions, SelectionText, Error));
+		TestTrue(TEXT("Niagara selection header is written"), SelectionText.Contains(TEXT("selection: nodes=1")));
+		TestTrue(TEXT("Only the selected Niagara node is exported"), SelectionText.Contains(TEXT("nodes: count=1")) && !SelectionText.Contains(TEXT("node N002")));
+		TestTrue(TEXT("Niagara boundary links are marked"), SelectionText.Contains(TEXT("unselected:")));
+		TestTrue(TEXT("The full signature is retained"), SelectionText.Contains(TEXT("signature:")));
+		SelectionOptions.SelectedNodeIds = {TEXT("NoSuchNode")};
+		TestFalse(TEXT("An unmatched Niagara selection fails"), FUE2CodeNiagaraExporter::ExportNiagaraFunctionScriptToString(FunctionScript, SelectionOptions, SelectionText, Error));
+	}
 
 	UNiagaraScript* ModuleScript = LoadObject<UNiagaraScript>(nullptr, TEXT("/Niagara/Modules/Emitter/SpawnRate.SpawnRate"));
 	if (!TestNotNull(TEXT("The engine SpawnRate Niagara Module Script is available"), ModuleScript))
